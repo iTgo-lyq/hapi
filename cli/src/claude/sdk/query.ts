@@ -47,7 +47,8 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
         private childStdin: Writable | null,
         private childStdout: NodeJS.ReadableStream,
         private processExitPromise: Promise<void>,
-        canCallTool?: CanCallToolCallback
+        canCallTool?: CanCallToolCallback,
+        private stopProcess?: () => Promise<void>
     ) {
         this.canCallTool = canCallTool
         this.readMessages()
@@ -72,6 +73,11 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
 
     getPromptFailure(): Error | null {
         return this.promptFailure
+    }
+
+    async close(): Promise<void> {
+        this.cleanupControllers()
+        await this.stopProcess?.()
     }
 
     /**
@@ -422,12 +428,13 @@ export function query(config: {
 
     // Setup cleanup
     let cleanupPromise: Promise<void> | null = null
+    let processStopped = false
     const cleanup = (): Promise<void> => {
         if (cleanupPromise) {
             return cleanupPromise
         }
         cleanupPromise = (async () => {
-            await killProcessByChildProcess(child)
+            processStopped = await killProcessByChildProcess(child)
             child.stdin.destroy()
             child.stdout.destroy()
             child.stderr.destroy()
@@ -446,7 +453,10 @@ export function query(config: {
 
     // Create query instance BEFORE registering close handler
     // to avoid temporal dependency on `query` variable
-    const query = new Query(childStdin, child.stdout, processExitPromise, canCallTool)
+    const query = new Query(childStdin, child.stdout, processExitPromise, canCallTool, async () => {
+        await cleanup()
+        if (!processStopped) throw new Error('Claude Code process stop could not be confirmed')
+    })
 
     if (typeof prompt !== 'string') {
         void streamToStdin(prompt, child.stdin, config.options?.abort).catch(async (error) => {

@@ -37,6 +37,7 @@ import { cleanupRunnerState, getInstalledCliMtimeMs, isRunnerRunningCurrentlyIns
 import { startRunnerControlServer } from './controlServer';
 import { createWorktree, removeWorktree, type WorktreeInfo } from './worktree';
 import { validateWorkspaceDirectory } from './validateWorkspaceDirectory';
+import { checkNativeResume, NativeSessionMissingError } from './nativeResume';
 import { join } from 'path';
 import { buildMachineMetadata } from '@/agent/sessionFactory';
 import { resolveWorkspaceRoots } from '@/utils/workspaceRoot';
@@ -687,6 +688,18 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           code: 'outside_workspace_roots',
           childStarted: false,
         };
+      }
+
+      if (options.resumeSessionId && (agent === 'claude' || agent === 'codex')) {
+        try {
+          await checkNativeResume(agent, options.resumeSessionId, directory);
+        } catch (error) {
+          return {
+            type: 'error', childStarted: false,
+            errorMessage: error instanceof Error ? error.message : String(error),
+            ...(error instanceof NativeSessionMissingError ? { code: 'native_session_missing' as const } : {}),
+          };
+        }
       }
 
       if (sessionType === 'worktree') {

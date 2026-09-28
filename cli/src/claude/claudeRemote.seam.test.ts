@@ -56,6 +56,23 @@ afterEach(() => {
 })
 
 describe('claudeRemote/query real seam', () => {
+    it('closes the native process before reporting a tool-controlled stop', async () => {
+        const child = createFakeChild()
+        spawnMock.mockReturnValueOnce(child)
+        process.env.HAPI_CLAUDE_PATH = 'claude'
+        const { claudeRemote } = await import('./claudeRemote')
+        const running = claudeRemote({ sessionId: null, path: process.cwd(), allowedTools: [], hookSettingsPath: '/tmp/hook.json',
+            canCallTool: async () => ({ behavior: 'deny', message: 'denied' }),
+            nextMessage: async () => ({ message: 'task', uuid: 'input', mode: { permissionMode: 'default' } }),
+            onReady: () => {}, isAborted: id => id === 'denied-tool', onSessionFound: () => {}, onMessage: () => {} })
+        child.stdout.write(JSON.stringify({ type: 'user', message: { role: 'user', content: [
+            { type: 'tool_result', tool_use_id: 'denied-tool', content: 'denied', is_error: true }
+        ] } }) + '\n')
+        expect(await running).toBe('controlled-stop')
+        expect(child.killed).toBe(true)
+        expect(killProcessMock).toHaveBeenCalledWith(child)
+    })
+
     it('passes batch UUIDs to stdin and ignores autonomous or stale results when advancing the input queue', async () => {
         const child = createFakeChild()
         spawnMock.mockReturnValueOnce(child)

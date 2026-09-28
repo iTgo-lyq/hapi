@@ -38,6 +38,7 @@ describe('claudeRemote fork bootstrap', () => {
         let promptClosed = false;
 
         queryMock.mockImplementationOnce(({ prompt }: { prompt: AsyncIterable<unknown> }) => ({
+            close: async () => {},
             async *[Symbol.asyncIterator]() {
                 const promptIterator = prompt[Symbol.asyncIterator]();
 

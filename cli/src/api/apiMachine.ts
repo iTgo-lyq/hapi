@@ -457,6 +457,7 @@ export class ApiMachineClient {
                         errorMessage: result.errorMessage,
                         code: result.code,
                         agent: result.agent,
+                        childStarted: result.childStarted,
                     }
             }
         })

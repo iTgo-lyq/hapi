@@ -28,7 +28,7 @@ vi.mock('@/ui/logger', () => ({
     logger: { debug: vi.fn() }
 }));
 
-import { CodexAppServerClient, isIndeterminateError } from './codexAppServerClient';
+import { CodexAppServerClient, CodexRpcError, isIndeterminateError } from './codexAppServerClient';
 
 function fakeStream(): EventEmitter & { setEncoding: ReturnType<typeof vi.fn> } {
     return Object.assign(new EventEmitter(), { setEncoding: vi.fn() });
@@ -74,6 +74,28 @@ describe('CodexAppServerClient process cwd', () => {
             expect.objectContaining({ cwd: '/neutral-home' })
         );
         await client.disconnect();
+    });
+
+    it('uses the selected runtime command and preserves structured native errors', async () => {
+        const child = fakeChild();
+        child.stdin.write.mockImplementation((data: string) => {
+            const request = JSON.parse(data);
+            queueMicrotask(() => child.stdout.emit('data', `${JSON.stringify({ id: request.id,
+                error: { code: -32600, message: 'native rejection', data: { reason: 'native' } } })}\n`));
+            return true;
+        });
+        spawnMock.mockReturnValue(child);
+        const client = new CodexAppServerClient({ cwd: '/work', command: { command: '/selected/codex', args: ['prefix'] } });
+        await client.connect();
+        expect(spawnMock).toHaveBeenCalledWith('/selected/codex', ['prefix', 'app-server'], expect.objectContaining({ cwd: '/work' }));
+        try {
+            await client.request('thread/read', { threadId: 'native' });
+            throw new Error('Expected RPC rejection');
+        } catch (error) {
+            expect(error).toBeInstanceOf(CodexRpcError);
+            expect(error).toMatchObject({ code: -32600, message: 'native rejection', data: { reason: 'native' } });
+            expect(isIndeterminateError(error)).toBe(false);
+        } finally { await client.disconnect(); }
     });
 
     it('steerTurn resolves dispatch on stdin accept and completes with the turn response', async () => {

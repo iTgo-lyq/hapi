@@ -37,7 +37,7 @@ export type SpawnSessionResult =
     | {
         type: 'error'
         errorMessage: string
-        code?: 'agent_unavailable' | 'outside_workspace_roots'
+        code?: 'agent_unavailable' | 'outside_workspace_roots' | 'native_session_missing'
         agent?: AgentFlavor
         /**
          * Explicit false = runner rejected before exec (no OS child). Hub may

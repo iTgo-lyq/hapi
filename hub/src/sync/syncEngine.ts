@@ -103,11 +103,11 @@ export type {
 
 export type ResumeSessionResult =
     | { type: 'success'; sessionId: string }
-    | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'no_machine_online' | 'resume_unavailable' | 'resume_failed'; rollbackSafe?: boolean }
+    | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'no_machine_online' | 'resume_unavailable' | 'resume_failed' | 'native_session_missing'; rollbackSafe?: boolean }
 
 export type ReopenSessionResult =
     | { type: 'success'; sessionId: string; resumed: boolean; cursorSessionProtocol?: 'acp' | 'stream-json' }
-    | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'no_machine_online' | 'resume_unavailable' | 'resume_failed' | 'metadata_conflict' }
+    | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'no_machine_online' | 'resume_unavailable' | 'resume_failed' | 'native_session_missing' | 'metadata_conflict' }
     | { type: 'incomplete'; message: string; missing: [string, ...string[]] }
 
 export type LocalResumeTargetResult =
@@ -3403,7 +3403,14 @@ export class SyncEngine {
                         }
                     }
                 }
-                return { type: 'error', message: spawnResult.message, code: 'resume_failed' }
+                if (spawnResult.childStarted === false && metadata.lifecycleState === 'archived') {
+                    await this.sessionCache.restoreSessionArchiveMetadata(access.sessionId, {
+                        lifecycleState: metadata.lifecycleState, lifecycleStateSince: metadata.lifecycleStateSince,
+                        archivedBy: metadata.archivedBy, archiveReason: metadata.archiveReason
+                    })
+                }
+                return { type: 'error', message: spawnResult.message,
+                    code: spawnResult.code === 'native_session_missing' ? 'native_session_missing' : 'resume_failed' }
             }
 
             if (requiresPiNativeReady && spawnResult.sessionId !== access.sessionId) {

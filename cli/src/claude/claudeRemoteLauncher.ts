@@ -372,7 +372,7 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                 // 'never'" (verified against `bun run typecheck`).
                 let inFlightMessage: InFlightMessage | null = null as InFlightMessage | null;
                 try {
-                    await claudeRemote({
+                    const completion = await claudeRemote({
                         sessionId: session.sessionId,
                         path: session.path,
                         allowedTools: session.allowedTools ?? [],
@@ -523,6 +523,7 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                         signal: controller.signal,
                     });
 
+                    if (completion === 'controlled-stop') this.execution.end('interrupted', 'control', { reason: 'tool_control_stopped' });
                     if (!this.exitReason && controller.signal.aborted) {
                         session.client.sendSessionEvent({ type: 'message', message: 'Aborted by user' });
                     }
@@ -530,7 +531,7 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                 } catch (e) {
                     logger.debug('[remote]: launch error', e);
                     const detail = e instanceof Error ? e.message : String(e);
-                    if (!controller.signal.aborted) this.execution.end('unknown', 'transport', { error: detail });
+                    this.execution.end('unknown', 'transport', { error: detail });
                     if (!this.exitReason && !controller.signal.aborted) {
                         session.client.sendSessionEvent({ type: 'error', message: `Process exited unexpectedly: ${detail}. Input was not automatically resent; inspect the result before retrying.` });
                         await this.respawnBackoff(getRespawnBackoffMs(), controller.signal);

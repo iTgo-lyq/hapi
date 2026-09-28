@@ -247,7 +247,7 @@ export class RpcGateway {
         | {
             type: 'error'
             message: string
-            code?: 'agent_unavailable' | 'outside_workspace_roots'
+            code?: 'agent_unavailable' | 'outside_workspace_roots' | 'native_session_missing'
             agent?: AgentFlavor
             /** Explicit false = no OS child; stub safe to delete (#1911 B3). */
             childStarted?: boolean
@@ -287,7 +287,7 @@ export class RpcGateway {
                     return { type: 'success', sessionId: obj.sessionId }
                 }
                 if (obj.type === 'error' && typeof obj.errorMessage === 'string') {
-                    const code = obj.code === 'agent_unavailable' || obj.code === 'outside_workspace_roots'
+                    const code = obj.code === 'agent_unavailable' || obj.code === 'outside_workspace_roots' || obj.code === 'native_session_missing'
                         ? obj.code
                         : undefined
                     const unavailableAgent = typeof obj.agent === 'string' ? obj.agent as AgentFlavor : undefined

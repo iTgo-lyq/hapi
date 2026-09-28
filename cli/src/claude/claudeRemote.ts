@@ -406,7 +406,7 @@ export async function claudeRemote(opts: {
                         if (c.type === 'tool_result' && c.tool_use_id && opts.isAborted(c.tool_use_id)) {
                             logger.debug('[claudeRemote] Tool aborted, exiting claudeRemote');
                             logger.debug(`${debugPrefix} tool aborted via tool_result; exiting stream loop`);
-                            return;
+                            return 'controlled-stop' as const;
                         }
                     }
                 }
@@ -422,10 +422,12 @@ export async function claudeRemote(opts: {
             throw e;
         }
     } finally {
+        await response.close();
         logger.debug(
             `${debugPrefix} finally ` +
             `(streamMessages=${streamMessageSeq}, results=${resultSeq}, nextFetches=${nextMessageFetchSeq}, inputEnded=${inputEnded})`
         );
         updateThinking(false);
     }
+    return;
 }

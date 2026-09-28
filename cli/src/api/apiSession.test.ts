@@ -310,6 +310,8 @@ describe('ApiSessionClient lazy materialization', () => {
         const event = socketHarness.sockets[0]?.emitted.find(entry => entry.event === 'message'
             && (entry.args[0] as { localId?: string }).localId === 'stable-execution-event')
         expect(event?.args[0]).toMatchObject({ localId: 'stable-execution-event', message: { content: { data: { phase: 'completed' } } } })
+        expect(socketHarness.sockets[0]?.emitted).toContainEqual({ event: 'messages-consumed',
+            args: [{ sid: client.sessionId, localIds: ['stable-execution-event'] }] })
         client.close()
     })
 

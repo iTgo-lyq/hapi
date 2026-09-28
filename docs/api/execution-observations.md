@@ -60,3 +60,28 @@ cancellation route instead.
 result; Claude supplies a control observation after the captured native process
 has finished aborting. A delayed request cannot target a later batch. Existing
 abort, permission, archive, and resume interfaces remain available.
+
+## Closing and resuming
+
+Use the existing archive and resume routes. Archive confirms the target execution
+has stopped; shared Codex sibling sessions may keep the shared wrapper alive.
+Resume returns the actual HAPI session ID, which callers must retain along with
+the native ID. Neither a transport failure nor an offline machine permits an
+automatic fresh spawn.
+
+`POST /api/sessions/:id/resume` returns HTTP 409 with code
+`native_session_missing` only when the Runner confirms missing native history.
+Claude checks its existing per-project transcript path; permission and other IO
+errors are not absence. Codex uses the selected native executable and its existing
+configuration to read the thread, resolving an unloaded thread through native
+resume if necessary. Only the exact native RPC code and missing-rollout error for
+that ID qualify. The temporary query process receives no prompt and is closed
+before the Runner proceeds. Unknown errors remain ordinary resume failures.
+A preflight rejection starts no execution and restores the prior archive state.
+
+Permissions use the existing approve/deny routes and native request IDs. Claude's
+existing tool-denial path ends its native process; its execution observation is
+`interrupted` with source `control` after process cleanup. If stopping cannot be
+confirmed, it remains unknown. Stable execution-event local IDs use the same
+consumed acknowledgement as other agent messages, so observations do not become
+queued user input or block fork/resume history operations.

@@ -1202,6 +1202,7 @@ export class ApiSessionClient extends EventEmitter {
                 message: content,
                 ...(event.type === 'execution' ? { localId: id } : {})
             })
+            if (event.type === 'execution' && id) this.socket.emit('messages-consumed', { sid: this.sessionId, localIds: [id] })
         }, event.type === 'execution' || event.type === 'message' || event.type === 'error' || event.type === 'compact-summary' ? 'lossless' : 'droppable')
     }
 

@@ -80,8 +80,16 @@ export function isIndeterminateError(error: unknown): boolean {
         && (error as Record<symbol, unknown>)[INDETERMINATE_SYMBOL] === true;
 }
 
+/** Preserve native RPC errors; transport failures must not masquerade as absence. */
+export class CodexRpcError extends Error {
+    constructor(message: string, readonly code?: number, readonly data?: unknown) {
+        super(message);
+    }
+}
+
 type CodexAppServerClientOptions = {
     cwd?: string;
+    command?: { command: string; args: string[] };
     /** An independently owned shared server. Disconnect only detaches this client. */
     endpoint?: string;
     token?: string;
@@ -254,9 +262,9 @@ export class CodexAppServerClient extends JsonLineParser {
             return;
         }
 
-        const codexCommand = resolveCodexAppServerCommand();
+        const codexCommand = this.options.command?.command ?? resolveCodexAppServerCommand();
         logger.debug(`[CodexAppServer] Starting ${codexCommand} app-server`);
-        const child = spawn(codexCommand, ['app-server'], {
+        const child = spawn(codexCommand, [...(this.options.command?.args ?? []), 'app-server'], {
             cwd: this.options.cwd,
             env: Object.keys(process.env).reduce((acc, key) => {
                 const value = process.env[key];
@@ -851,7 +859,7 @@ export class CodexAppServerClient extends JsonLineParser {
         this.pending.delete(response.id);
 
         if (response.error) {
-            pending.reject(new Error(response.error.message));
+            pending.reject(new CodexRpcError(response.error.message, response.error.code, response.error.data));
             return;
         }
 

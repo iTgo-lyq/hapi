@@ -30,8 +30,9 @@ function deferred<T>(): {
     return { promise, resolve, reject };
 }
 
-function createAsyncStream(messages: SDKMessage[]): AsyncIterable<SDKMessage> {
+function createAsyncStream(messages: SDKMessage[]): AsyncIterable<SDKMessage> & { close(): Promise<void> } {
     return {
+        close: async () => {},
         async *[Symbol.asyncIterator]() {
             for (const message of messages) {
                 await Promise.resolve();
@@ -43,6 +44,7 @@ function createAsyncStream(messages: SDKMessage[]): AsyncIterable<SDKMessage> {
 
 function createQueryThatMirrorsPromptErrors(messages: SDKMessage[]) {
     return ({ prompt }: { prompt: AsyncIterable<unknown> }) => ({
+        close: async () => {},
         async *[Symbol.asyncIterator]() {
             const promptIterator = prompt[Symbol.asyncIterator]();
 

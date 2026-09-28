@@ -1,6 +1,7 @@
 export const RPC_METHODS = {
     Permission: 'permission',
     Abort: 'abort',
+    InterruptExecution: 'interrupt-execution',
     Switch: 'switch',
     SetSessionConfig: 'set-session-config',
     KillSession: 'killSession',

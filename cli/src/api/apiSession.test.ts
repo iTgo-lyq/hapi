@@ -297,6 +297,22 @@ describe('ApiSessionClient lazy materialization', () => {
         client.close()
     })
 
+    it('keeps execution observations lossless and transmits their stable localId', async () => {
+        socketHarness.sockets.length = 0
+        const pending = deferred<Session>()
+        const client = new ApiSessionClient('token', createSession(), { materialize: async () => pending.promise })
+        client.notifyUserActivity()
+        client.sendSessionEvent({ type: 'execution', version: 1, runtime: 'codex', executionId: 'turn',
+            inputLocalIds: ['input'], phase: 'completed', source: 'native' }, 'stable-execution-event')
+        for (let i = 0; i < 300; i++) client.sendSessionEvent({ type: 'ready' })
+        pending.resolve(createSession({ namespace: 'default' }))
+        await client.materialize()
+        const event = socketHarness.sockets[0]?.emitted.find(entry => entry.event === 'message'
+            && (entry.args[0] as { localId?: string }).localId === 'stable-execution-event')
+        expect(event?.args[0]).toMatchObject({ localId: 'stable-execution-event', message: { content: { data: { phase: 'completed' } } } })
+        client.close()
+    })
+
     it('drains in-flight materialization and initial socket delivery before closing', async () => {
         socketHarness.sockets.length = 0
         const pendingMaterialization = deferred<Session>()

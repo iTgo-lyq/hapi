@@ -8,6 +8,7 @@ import { listSlashCommands } from '@/modules/common/slashCommands';
 import { normalizeCodexModel } from '@/modules/common/codexModels';
 import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+import { codexExecutionId, InterruptExecutionRequestSchema, type InterruptExecutionResponse } from '@hapi/protocol';
 import { ImplementCodexPlanRequestSchema, type ImplementCodexPlanResult } from '@hapi/protocol/apiTypes';
 import { CodexAppServerClient, isIndeterminateError } from '../codexAppServerClient';
 import { buildHapiMcpBridge, type HapiMcpBridge } from '../utils/buildHapiMcpBridge';
@@ -192,7 +193,7 @@ export class SharedCodexRoot {
         await this.queue.load();
         this.projection = new SharedCodexProjection(this.session, threadId, id => this.queue.committed(id));
         this.session.updateMetadata(metadata => ({ ...metadata, codexSessionId: threadId, capabilities: {
-            ...metadata.capabilities, concurrentClients: true, terminal: true,
+            ...metadata.capabilities, concurrentClients: true, terminal: true, execution: 1,
             // In-place rewind needs a native + hub commit barrier. Do not
             // advertise a destructive operation we cannot make atomic yet.
             conversationHistory: { forkCurrent: true, forkAtMessage: true, rewindToMessage: false }
@@ -462,6 +463,19 @@ export class SharedCodexRoot {
         rpc.registerHandler(RPC_METHODS.Abort, async () => {
             const turnId = this.currentTurn;
             if (turnId) await this.client.request('turn/interrupt', { threadId: this.threadId, turnId });
+        });
+        rpc.registerHandler(RPC_METHODS.InterruptExecution, async (raw): Promise<InterruptExecutionResponse> => {
+            const target = InterruptExecutionRequestSchema.parse(raw);
+            const turnId = this.currentTurn;
+            const executionId = turnId ? codexExecutionId(this.threadId, turnId) : target.executionId;
+            const inputLocalIds = turnId ? this.projection.inputsFor(turnId) : [];
+            if (!turnId) return { status: 'not_running', executionId, inputLocalIds };
+            if (target.executionId !== executionId || this.projection.turnFor(target.inputLocalId) !== turnId) {
+                return { status: 'target_mismatch', executionId, inputLocalIds };
+            }
+            // No await between checking currentTurn and sending its explicit ID.
+            await this.client.request('turn/interrupt', { threadId: this.threadId, turnId });
+            return { status: 'requested', executionId, inputLocalIds };
         });
         rpc.registerHandler(RPC_METHODS.KillSession, async () => { await this.host.end(this); return { success: true }; });
         // #1911 C2 / AC6: Codex owns KillSession here and never calls

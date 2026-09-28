@@ -1,4 +1,6 @@
 import React from "react";
+import { ClaudeExecution } from './execution';
+import { InterruptExecutionRequestSchema, RPC_METHODS, type InterruptExecutionResponse } from '@hapi/protocol';
 import { Session } from "./session";
 import { RemoteModeDisplay } from "@/ui/ink/RemoteModeDisplay";
 import { claudeRemote } from "./claudeRemote";
@@ -26,17 +28,6 @@ interface PermissionsField {
     allowedTools?: string[];
 }
 
-// If claudeRemote() throws before it ever reaches onReady (spawn failure,
-// invalid model/args, auth failure, resume-anchor rejection, ...), the failure
-// is almost certainly deterministic: respawning immediately just repeats the
-// same failure. MAX_IMMEDIATE_RESPAWN_FAILURES caps consecutive such failures
-// before this loop drops the message that keeps triggering them instead of
-// respawning forever, and getRespawnBackoffMs() paces the retries in between.
-// The streak resets whenever an attempt reaches onReady, or once the message
-// is dropped, so a later unrelated failure gets its own fresh budget. Only
-// the one message is given up on -- the session/process itself is not ended.
-const MAX_IMMEDIATE_RESPAWN_FAILURES = 3;
-
 function getRespawnBackoffMs(): number {
     const raw = process.env.CLAUDE_REMOTE_RESPAWN_BACKOFF_MS;
     if (raw === undefined) return 1000;
@@ -47,6 +38,7 @@ function getRespawnBackoffMs(): number {
 
 class ClaudeRemoteLauncher extends RemoteLauncherBase {
     private readonly session: Session;
+    private readonly execution: ClaudeExecution;
     private abortController: AbortController | null = null;
     private abortFuture: Future<void> | null = null;
     private permissionHandler: PermissionHandler | null = null;
@@ -55,6 +47,7 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
     constructor(session: Session) {
         super(process.env.DEBUG ? session.logPath : undefined);
         this.session = session;
+        this.execution = new ClaudeExecution((event, id) => session.client.sendSessionEvent(event, id));
     }
 
     protected createDisplay(context: RemoteLauncherDisplayContext): React.ReactElement {
@@ -133,6 +126,24 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
             onSwitch: () => this.handleSwitchRequest()
         });
 
+        session.client.updateMetadata(metadata => ({ ...metadata, capabilities: { ...metadata.capabilities, execution: 1 } }));
+        session.client.rpcHandlerManager.registerHandler(RPC_METHODS.InterruptExecution, async (raw): Promise<InterruptExecutionResponse> => {
+            const target = InterruptExecutionRequestSchema.parse(raw);
+            const current = this.execution.current;
+            if (!current) return { status: 'not_running', executionId: target.executionId, inputLocalIds: [] };
+            const result = { executionId: current.id, inputLocalIds: current.inputLocalIds };
+            if (target.executionId !== current.id || !current.inputLocalIds.includes(target.inputLocalId)) {
+                return { status: 'target_mismatch', ...result };
+            }
+            // Capture this controller/future before yielding; a late call cannot abort the next SDK process.
+            const controller = this.abortController;
+            const done = this.abortFuture;
+            if (!controller || controller.signal.aborted) return { status: 'not_running', ...result };
+            controller.abort();
+            await done?.promise;
+            return { status: 'requested', ...result };
+        });
+
         const permissionHandler = new PermissionHandler(session);
         this.permissionHandler = permissionHandler;
 
@@ -160,7 +171,9 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
         let planModeToolCalls = new Set<string>();
         let ongoingToolCalls = new Map<string, { parentToolCallId: string | null }>();
 
+        const execution = this.execution;
         function onMessage(message: SDKMessage) {
+            execution.observe(message);
             formatClaudeMessageForInk(message, messageBuffer);
             permissionHandler.onMessage(message);
 
@@ -319,7 +332,6 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
             } | null = null;
 
             let previousSessionId: string | null = null;
-            let immediateFailureCount = 0;
             while (!this.exitReason) {
                 logger.debug('[remote]: launch');
                 messageBuffer.addMessage('═'.repeat(40), 'status');
@@ -341,29 +353,8 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                 this.abortFuture = new Future<void>();
                 let modeHash: string | null = null;
                 let mode: EnhancedMode | null = null;
-                // True once onReady() has fired at least once during this
-                // attempt. Used to distinguish an immediate/deterministic
-                // failure (never reached ready) from a failure after real
-                // progress was made, for the respawn-storm guard below.
-                let reachedReadyThisAttempt = false;
-                // True once nextMessage() has actually handed a message to the
-                // SDK during this attempt (as opposed to parking it into
-                // `pending` and returning null). Some commands complete and
-                // return successfully without ever calling onReady -- e.g.
-                // claudeRemote.ts's /clear handling calls onSessionReset() and
-                // returns directly -- so onReady alone cannot tell "a real
-                // message was processed" apart from "nothing was delivered
-                // this attempt" (e.g. the livelock-prone park-then-return-null
-                // case). See the success-path reset below.
-                let deliveredMessageThisAttempt = false;
-                // Tracks the most recent message batch handed to the SDK via
-                // nextMessage() that has not yet been confirmed complete by a
-                // following onReady(). If claudeRemote() throws while a
-                // message is in flight, it is dequeued+acked already (see
-                // MessageQueue2.collectBatch) but never delivered -- the catch
-                // block below restores it with queue.unshift()/unshiftIsolated()
-                // (per original item, preserving each item's localId) so it is
-                // not silently dropped.
+                // A dequeued SDK batch can already have side effects. Never restore
+                // it merely because the stream ended without a result.
                 type InFlightMessage = {
                     items: Array<{ message: string; localId?: string }>;
                     mode: EnhancedMode;
@@ -425,14 +416,14 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                                 // mid-session model switch), so a construction-time snapshot
                                 // would go stale. See SDKToLogConverter.updateSelectedModel.
                                 sdkToLogConverter.updateSelectedModel(p.mode.model ?? null);
-                                deliveredMessageThisAttempt = true;
                                 const deliveredText = session.expandSkillReference(p.message)
                                 inFlightMessage = { items: p.items, mode: p.mode, isolate: p.isolate, deliveredText };
                                 session.client.notePendingHubPromptEcho(
                                     deliveredText,
                                     p.items.flatMap((item) => item.localId ? [item.localId] : [])
                                 )
-                                return { ...p, message: deliveredText };
+                                const uuid = this.execution.begin(p.items.flatMap(item => item.localId ? [item.localId] : []), session.sessionId ?? undefined);
+                                return { ...p, message: deliveredText, uuid };
                             }
 
                             let msg = await session.queue.waitForMessagesAndGetAsString(controller.signal);
@@ -460,7 +451,6 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                                 mode = msg.mode;
                                 permissionHandler.handleModeChange(mode.permissionMode);
                                 sdkToLogConverter.updateSelectedModel(mode.model ?? null);
-                                deliveredMessageThisAttempt = true;
                                 const deliveredText = session.expandSkillReference(msg.message)
                                 inFlightMessage = { items: msg.items, mode: msg.mode, isolate: msg.isolate, deliveredText };
                                 session.client.notePendingHubPromptEcho(
@@ -469,7 +459,8 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                                 )
                                 return {
                                     message: deliveredText,
-                                    mode: msg.mode
+                                    mode: msg.mode,
+                                    uuid: this.execution.begin(msg.items.flatMap(item => item.localId ? [item.localId] : []), session.sessionId ?? undefined)
                                 };
                             }
 
@@ -508,11 +499,7 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                             session.consumeOneTimeFlags();
                         },
                         onReady: async (completionEvent?: string) => {
-                            // Reaching ready at all means this attempt is not an
-                            // immediate/deterministic failure -- reset the
-                            // respawn-storm guard. The turn that led here is no
-                            // longer "in flight" either.
-                            reachedReadyThisAttempt = true;
+                            // claudeRemote gates ready on this batch's native UUID.
                             inFlightMessage = null;
 
                             await messageQueue.flush();
@@ -540,108 +527,24 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                         session.client.sendSessionEvent({ type: 'message', message: 'Aborted by user' });
                     }
 
-                    // A full attempt completed without throwing. Clear the
-                    // immediate-failure streak if this attempt either reached
-                    // onReady, or actually delivered a message to the SDK
-                    // (deliveredMessageThisAttempt) -- some commands complete
-                    // successfully without ever calling onReady (e.g.
-                    // claudeRemote.ts's /clear handling calls onSessionReset()
-                    // and returns directly), and that is still real progress,
-                    // not an immediate/deterministic failure. Without the
-                    // deliveredMessageThisAttempt half of this condition, a
-                    // successful /clear between two unrelated launch failures
-                    // would not reset the streak and the cap could fire after
-                    // just one more failure instead of a fresh budget of 3.
-                    //
-                    // Neither flag is set for a trivial no-op completion (e.g.
-                    // the initial nextMessage() returning null because the
-                    // only queued message was parked into `pending` for a
-                    // later attempt, per claudeRemote.ts's "initial
-                    // nextMessage returned null; exiting") -- resetting on
-                    // that case would clear the streak every other attempt
-                    // while the underlying deterministic failure keeps
-                    // recurring on alternating attempts, and the cap would
-                    // never fire (livelock).
-                    if (reachedReadyThisAttempt || deliveredMessageThisAttempt) {
-                        immediateFailureCount = 0;
-                    }
                 } catch (e) {
                     logger.debug('[remote]: launch error', e);
-
-                    // Restores a message batch that was already
-                    // dequeued+acked from the queue (see
-                    // MessageQueue2.collectBatch: the ack fires at dequeue
-                    // time, before the SDK ever sees the message) but never
-                    // got a chance to be processed, so it is retried instead
-                    // of lost. Each original item is unshifted individually,
-                    // in reverse order, so per-item localId is preserved
-                    // (reconnecting the retried prompt to its hub row instead
-                    // of a localId-less orphan) and the original relative
-                    // order is restored -- collectBatch() joins same-mode
-                    // items into a single `message` string for the SDK, but
-                    // still returns the pre-join `items` breakdown for this.
-                    const restoreInFlightMessage = () => {
-                        if (!inFlightMessage) return;
-                        const { items, mode, isolate } = inFlightMessage;
-                        for (const item of [...items].reverse()) {
-                            if (isolate) {
-                                session.queue.unshiftIsolated(item.message, mode, item.localId);
-                            } else {
-                                session.queue.unshift(item.message, mode, item.localId);
-                            }
-                        }
-                        inFlightMessage = null;
-                    };
-
-                    if (!this.exitReason) {
-                        const detail = e instanceof Error ? e.message : String(e);
-
-                        if (reachedReadyThisAttempt) {
-                            immediateFailureCount = 0;
-                        } else {
-                            immediateFailureCount += 1;
-                        }
-
-                        if (immediateFailureCount >= MAX_IMMEDIATE_RESPAWN_FAILURES) {
-                            // Give up on retrying *this message*, not the
-                            // whole session. Restoring it here would feed it
-                            // straight back into another immediate failure on
-                            // the very next attempt (unshift -> re-dequeue ->
-                            // re-throw), storming again -- matches
-                            // cursorLegacyRemoteLauncher's drop-and-reset
-                            // policy on its own consecutive-failure cap.
-                            // Reset the streak and keep the loop (and this OS
-                            // process) alive so an unrelated later message
-                            // gets its own fresh budget.
-                            for (const item of inFlightMessage?.items ?? []) {
-                                if (item.localId) {
-                                    session.client.discardPendingHubPromptEcho(item.localId)
-                                }
-                            }
-                            if (inFlightMessage?.deliveredText) {
-                                session.client.discardPendingHubPromptEchoText(inFlightMessage.deliveredText)
-                            }
-                            inFlightMessage = null;
-                            session.client.sendSessionEvent({
-                                type: 'message',
-                                message: `Process exited unexpectedly ${MAX_IMMEDIATE_RESPAWN_FAILURES} times in a row: ${detail}. Dropping the queued message; resolve the issue and resend it.`
-                            });
-                            immediateFailureCount = 0;
-                        } else {
-                            restoreInFlightMessage();
-                            session.client.sendSessionEvent({ type: 'message', message: `Process exited unexpectedly: ${detail}` });
-                            await this.respawnBackoff(getRespawnBackoffMs(), controller.signal);
-                            continue;
-                        }
-                    } else {
-                        // exitReason already set by something else (e.g. a
-                        // user-initiated switch/exit racing this throw) --
-                        // still restore any in-flight message so it isn't
-                        // silently dropped by that unrelated shutdown.
-                        restoreInFlightMessage();
+                    const detail = e instanceof Error ? e.message : String(e);
+                    if (!controller.signal.aborted) this.execution.end('unknown', 'transport', { error: detail });
+                    if (!this.exitReason && !controller.signal.aborted) {
+                        session.client.sendSessionEvent({ type: 'error', message: `Process exited unexpectedly: ${detail}. Input was not automatically resent; inspect the result before retrying.` });
+                        await this.respawnBackoff(getRespawnBackoffMs(), controller.signal);
                     }
                 } finally {
                     logger.debug('[remote]: launch finally');
+                    this.execution.end(controller.signal.aborted ? 'interrupted' : 'unknown',
+                        controller.signal.aborted ? 'control' : 'transport',
+                        { reason: controller.signal.aborted ? 'native_process_aborted' : 'native_stream_ended_without_result' });
+                    for (const item of inFlightMessage?.items ?? []) {
+                        if (item.localId) session.client.discardPendingHubPromptEcho(item.localId);
+                    }
+                    if (inFlightMessage?.deliveredText) session.client.discardPendingHubPromptEchoText(inFlightMessage.deliveredText);
+
 
                     for (let [toolCallId, { parentToolCallId }] of ongoingToolCalls) {
                         const converted = sdkToLogConverter.generateInterruptedToolResult(toolCallId, parentToolCallId);
@@ -675,6 +578,10 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
 
     protected async cleanup(): Promise<void> {
         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
+        this.session.client.rpcHandlerManager.registerHandler(RPC_METHODS.InterruptExecution, async (raw): Promise<InterruptExecutionResponse> => {
+            const target = InterruptExecutionRequestSchema.parse(raw);
+            return { status: 'not_running', executionId: target.executionId, inputLocalIds: [] };
+        });
 
         if (this.handleSessionFound) {
             this.session.removeSessionFoundCallback(this.handleSessionFound);

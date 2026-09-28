@@ -1,6 +1,7 @@
 export * from './scratchlistAttachments'
 export * from './workGraph'
 export * from './apiTypes'
+export * from './execution'
 export * from './cursorCliSku'
 export * from './messages'
 export * from './buildInfo'

@@ -62,6 +62,7 @@ function createApp(session: Session, opts?: {
     listSlashCommands?: SyncEngine['listSlashCommands']
     getSessionExport?: (sessionId: string, session: Session, options?: { force?: boolean }) => unknown
     sessionExists?: boolean
+    interruptExecution?: SyncEngine['interruptExecution']
     archiveSession?: (sessionId: string) => Promise<void>
     getCursorChatStoreStatus?: SyncEngine['getCursorChatStoreStatus']
     listCodexModelsForSession?: SyncEngine['listCodexModelsForSession']
@@ -158,6 +159,7 @@ function createApp(session: Session, opts?: {
             type: 'success' as const,
             status: { onDisk: true, store: 'acp' as const }
         })),
+        interruptExecution: opts?.interruptExecution,
         archiveSession: archiveSessionMock,
         setSessionPinned: opts?.setSessionPinned ?? (() => {}),
         setSessionPinMode: opts?.setSessionPinMode ?? (() => {}),
@@ -1750,3 +1752,24 @@ describe('sessions routes', () => {
     })
 
 })
+
+
+describe('targeted execution interrupt', () => {
+    it('requires the session capability and forwards the target without falling back to abort', async () => {
+        const calls: unknown[] = [];
+        const invoke = async (sessionId: string, target: { inputLocalId: string; executionId: string }) => {
+            calls.push({ sessionId, target });
+            return { status: 'target_mismatch' as const, executionId: 'current', inputLocalIds: ['new-input'] };
+        };
+        for (const capable of [false, true]) {
+            const { app } = createApp(createSession({ metadata: { path: '/project', host: 'local', capabilities: capable ? { execution: 1 } : {} } }), { interruptExecution: invoke });
+            const response = await app.request('/api/sessions/session-1/execution/interrupt', {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ inputLocalId: 'old-input', executionId: 'old' })
+            });
+            expect(response.status).toBe(capable ? 200 : 409);
+            expect(await response.json()).toMatchObject(capable ? { status: 'target_mismatch' } : { code: 'execution_capability_missing' });
+        }
+        expect(calls).toEqual([{ sessionId: 'session-1', target: { inputLocalId: 'old-input', executionId: 'old' } }]);
+    });
+});

@@ -12,6 +12,7 @@ import { PermissionResult } from "./sdk/types";
 import { getHapiBlobsDir } from "@/constants/uploadPaths";
 import { getDefaultClaudeCodePath } from "./sdk/utils";
 import { filterCatalogAffectingClaudeArgs } from "./sdk/metadataExtractor";
+import { nativeInputIds } from './execution';
 
 export async function claudeRemote(opts: {
 
@@ -29,7 +30,7 @@ export async function claudeRemote(opts: {
     bootstrapMode?: EnhancedMode,
 
     // Dynamic parameters
-    nextMessage: () => Promise<{ message: string, mode: EnhancedMode } | null>,
+    nextMessage: () => Promise<{ message: string, mode: EnhancedMode, uuid?: string } | null>,
     onReady: (completionEvent?: string) => void | Promise<void>,
     isAborted: (toolCallId: string) => boolean,
 
@@ -103,11 +104,12 @@ export async function claudeRemote(opts: {
     let isCompactCommand = false;
     let compactFailure: string | null = null;
     let awaitingForkInit = forkSession;
+    let activeInputUuid: string | undefined;
 
     const messages = new PushableAsyncIterable<SDKUserMessage>();
 
     const applyInitialTurn = async (): Promise<{ message: string; mode: EnhancedMode } | null> => {
-        let next: { message: string; mode: EnhancedMode } | null;
+        let next: { message: string; mode: EnhancedMode; uuid?: string } | null;
         try {
             next = await opts.nextMessage();
         } catch (e) {
@@ -145,8 +147,10 @@ export async function claudeRemote(opts: {
         }
 
         mode = next.mode;
+        activeInputUuid = next.uuid;
         messages.push({
             type: 'user',
+            ...(next.uuid ? { uuid: next.uuid } : {}),
             message: {
                 role: 'user',
                 content: next.message,
@@ -256,7 +260,8 @@ export async function claudeRemote(opts: {
                     return;
                 }
                 mode = next.mode;
-                messages.push({ type: 'user', message: { role: 'user', content: next.message } });
+                activeInputUuid = next.uuid;
+                messages.push({ type: 'user', ...(next.uuid ? { uuid: next.uuid } : {}), message: { role: 'user', content: next.message } });
                 logger.debug(
                     `${debugPrefix} nextMessage resolved fetchId=${fetchId} elapsedMs=${Date.now() - startedAt} ` +
                     `messageLength=${next.message.length} permissionMode=${next.mode.permissionMode}`
@@ -358,6 +363,10 @@ export async function claudeRemote(opts: {
 
             // Handle result messages
             if (message.type === 'result') {
+                // Autonomous and sidechain results do not consume the pending batch.
+                // Older native clients without UUID correlation leave it unknown.
+                if (message.parent_tool_use_id || (activeInputUuid && !nativeInputIds(message).includes(activeInputUuid))) continue;
+                activeInputUuid = undefined;
                 resultSeq += 1;
                 updateThinking(false);
                 logger.debug(

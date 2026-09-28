@@ -24,7 +24,9 @@ vi.mock('../codexAppServerClient', () => ({
         async initialize() { this.initialized = true; }
         isInitialized() { return this.initialized; }
         async disconnect() { this.initialized = false; }
+        interruptedTurns: string[] = [];
         async request(method: string, params: Record<string, unknown> = {}) {
+            if (method === 'turn/interrupt') { this.interruptedTurns.push(String(params.turnId)); return {}; }
             if (method === 'thread/read' || method === 'thread/resume') return { ...this.settings, thread: structuredClone(this.thread) };
             if (method === 'thread/list') return { data: [] };
             if (method === 'thread/queue/list') return { data: this.queue };
@@ -88,6 +90,7 @@ async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end'] }) 
     await root.bind('thread', { model: 'mock', thread: { turns: [] } }, false);
     const native = root.client as unknown as {
         initialized: boolean;
+        interruptedTurns: string[];
         thread: { id: string; turns: NativeTurn[] };
         queue: Array<{ id: string; clientUserMessageId: string; input: unknown }>;
         notify(method: string, params: unknown): void;
@@ -116,6 +119,29 @@ async function completePlan(f: Awaited<ReturnType<typeof fixture>>, status = 'co
 }
 
 describe('shared plan actions', () => {
+    it('does not let a late targeted interrupt hit a newer turn, and returns merged inputs', async () => {
+        const f = await fixture();
+        await f.root.activate();
+        const start = async (turnId: string, ids: string[]) => {
+            f.native.notify('turn/started', { threadId: 'thread', turn: { id: turnId } });
+            for (const id of ids) f.native.notify('item/started', { threadId: 'thread', turnId,
+                item: { id, type: 'userMessage', clientUserMessageId: id, content: [] } });
+            await vi.waitFor(() => expect(f.metadata().conversationHistoryTurns?.[ids.at(-1)!]).toBe(turnId));
+        };
+        const interrupt = f.rpc.get(RPC_METHODS.InterruptExecution)!;
+        await start('old', ['old-input']);
+        f.native.notify('turn/completed', { threadId: 'thread', turn: { id: 'old', status: 'completed' } });
+        await start('new', ['one', 'steered']);
+        expect(await interrupt({ inputLocalId: 'old-input', executionId: 'codex:thread:old' })).toMatchObject({ status: 'target_mismatch' });
+        expect(f.native.interruptedTurns).toEqual([]);
+        expect(await interrupt({ inputLocalId: 'steered', executionId: 'codex:thread:new' })).toEqual({
+            status: 'requested', executionId: 'codex:thread:new', inputLocalIds: ['one', 'steered']
+        });
+        expect(f.native.interruptedTurns).toEqual(['new']);
+        f.native.notify('turn/completed', { threadId: 'thread', turn: { id: 'new', status: 'interrupted' } });
+        expect(await interrupt({ inputLocalId: 'one', executionId: 'codex:thread:new' })).toMatchObject({ status: 'not_running' });
+    });
+
     it('applies remote change_title as metadata.name then lets native terminal rename win', async () => {
         const f = await fixture();
         const item = { id: 'title', type: 'mcpToolCall', server: 'hapi', tool: 'change_title',

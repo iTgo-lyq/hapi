@@ -1812,3 +1812,24 @@ describe('MessageService.sweepImmediateQueuedOnSessionEnd — scheduled rows are
         expect(stillQueued.find((m) => m.localId === 'local-future')?.invokedAt).toBeNull()
     })
 })
+
+
+describe('durable consumed input replay guard', () => {
+    it('does not emit invoked or indeterminate duplicates even after a fresh service instance', async () => {
+        const store = makeStore();
+        const session = makeSession(store, 'consumed-replay');
+        let emitted = 0;
+        const io = { of: () => ({ to: () => ({ emit: () => { emitted++; } }) }) } as unknown as Server;
+        const service = () => new MessageService(store, io, makePublisher() as unknown as EventPublisher);
+        await service().sendMessage(session.id, { text: 'run once', localId: 'input' });
+        expect(emitted).toBe(1);
+        store.messages.markMessagesInvoked(session.id, ['input'], Date.now());
+        await service().sendMessage(session.id, { text: 'run once', localId: 'input' });
+        expect(emitted).toBe(1);
+        store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'uncertain' } }, 'uncertain');
+        store.messages.setMessagesDeliveryState(session.id, ['uncertain'], 'indeterminate');
+        await service().sendMessage(session.id, { text: 'uncertain', localId: 'uncertain' });
+        expect(emitted).toBe(1);
+        store.close();
+    });
+});

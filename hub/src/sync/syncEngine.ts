@@ -20,6 +20,7 @@ import { hasConversationMessageContent, unwrapRoleWrappedRecordEnvelope } from '
 import type { Server } from 'socket.io'
 import { createHash, randomUUID } from 'node:crypto'
 import { SpawnSessionRequestSchema, type SpawnReceipt, type SpawnSessionRequest } from '@hapi/protocol'
+import type { InterruptExecutionRequest, InterruptExecutionResponse } from '@hapi/protocol'
 import type { Store, CancelQueuedMessageResult } from '../store'
 import type { HapiSessionExportResult } from '@hapi/protocol/sessionExport'
 import type { RpcRegistry } from '../socket/rpcRegistry'
@@ -1182,6 +1183,10 @@ export class SyncEngine {
 
     async abortSession(sessionId: string): Promise<void> {
         await this.rpcGateway.abortSession(sessionId)
+    }
+
+    async interruptExecution(sessionId: string, target: InterruptExecutionRequest): Promise<InterruptExecutionResponse> {
+        return this.rpcGateway.interruptExecution(sessionId, target)
     }
 
     private assertConversationHistoryIdle(session: Session): void {

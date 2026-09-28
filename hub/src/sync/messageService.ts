@@ -896,7 +896,8 @@ export class MessageService {
         const cliContent = inserted.inserted
             ? msg.content
             : contentForDeferredDelivery(msg.content)
-        const shouldEmitToCli = msg.deliveryState !== 'indeterminate'
+        const shouldEmitToCli = (inserted.inserted || msg.invokedAt === null)
+            && msg.deliveryState !== 'indeterminate' && msg.deliveryState !== 'dispatching'
         this.onSessionActivity?.(actualSessionId, msg.createdAt)
 
         // Only emit to CLI if the message is not scheduled for the future.

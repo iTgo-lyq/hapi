@@ -56,6 +56,38 @@ afterEach(() => {
 })
 
 describe('claudeRemote/query real seam', () => {
+    it('passes batch UUIDs to stdin and ignores autonomous or stale results when advancing the input queue', async () => {
+        const child = createFakeChild()
+        spawnMock.mockReturnValueOnce(child)
+        process.env.HAPI_CLAUDE_PATH = 'claude'
+        const { claudeRemote } = await import('./claudeRemote')
+        const sent: any[] = []
+        child.stdin.on('data', data => { for (const line of String(data).trim().split('\n')) sent.push(JSON.parse(line)) })
+        const nextMessage = vi.fn().mockResolvedValueOnce({ message: 'A', uuid: 'input-a', mode: { permissionMode: 'default' } })
+            .mockResolvedValueOnce({ message: 'B', uuid: 'input-b', mode: { permissionMode: 'default' } })
+            .mockResolvedValue(null)
+        const onReady = vi.fn()
+        const running = claudeRemote({ sessionId: null, path: process.cwd(), allowedTools: [], hookSettingsPath: '/tmp/hook.json',
+            canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }), nextMessage, onReady,
+            isAborted: () => false, onSessionFound: () => {}, onMessage: () => {} })
+        const result = (id: string) => child.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, user_message_uuid: id }) + '\n')
+        await vi.waitFor(() => expect(sent[0]?.uuid).toBe('input-a'))
+        result('autonomous')
+        await new Promise(resolve => setTimeout(resolve, 10))
+        expect(onReady).not.toHaveBeenCalled()
+        expect(nextMessage).toHaveBeenCalledTimes(1)
+        result('input-a')
+        await vi.waitFor(() => expect(sent[1]?.uuid).toBe('input-b'))
+        result('input-a')
+        await new Promise(resolve => setTimeout(resolve, 10))
+        expect(onReady).toHaveBeenCalledTimes(1)
+        expect(nextMessage).toHaveBeenCalledTimes(2)
+        result('input-b')
+        await vi.waitFor(() => expect(onReady).toHaveBeenCalledTimes(2))
+        child.stdout.end(); child.emit('close', 0)
+        await running
+    })
+
     it('propagates scheduled nextMessage failures through real query prompt plumbing', async () => {
         const child = createFakeChild()
         spawnMock.mockReturnValueOnce(child)

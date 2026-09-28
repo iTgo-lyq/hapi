@@ -1,4 +1,5 @@
 import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, PermissionMode } from '@hapi/protocol/types'
+import { InterruptExecutionResponseSchema, type InterruptExecutionRequest, type InterruptExecutionResponse } from '@hapi/protocol'
 import { PERMISSION_REQUEST_NOT_FOUND_MESSAGE, RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import {
     ArchiveCodexSessionRpcResponseSchema,
@@ -165,6 +166,10 @@ export class RpcGateway {
 
     async abortSession(sessionId: string): Promise<void> {
         await this.sessionRpc(sessionId, RPC_METHODS.Abort, { reason: 'User aborted via Telegram Bot' })
+    }
+
+    async interruptExecution(sessionId: string, target: InterruptExecutionRequest): Promise<InterruptExecutionResponse> {
+        return InterruptExecutionResponseSchema.parse(await this.sessionRpc(sessionId, RPC_METHODS.InterruptExecution, target))
     }
 
     async switchSession(sessionId: string, to: 'remote' | 'local'): Promise<void> {

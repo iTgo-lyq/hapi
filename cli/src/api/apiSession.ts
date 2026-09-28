@@ -12,7 +12,7 @@ import type { RawJSONLines } from '@/claude/types'
 import { configuration } from '@/configuration'
 import { extractUserRequest } from '@/agy/utils/agyMessageText'
 import { AGENT_MESSAGE_PAYLOAD_TYPE } from "@hapi/protocol"
-import type { SessionEndReason } from '@hapi/protocol'
+import type { SessionEndReason, ExecutionObservation } from '@hapi/protocol'
 import type { ClientToServerEvents, ServerToClientEvents, TerminalOutputPayload, Update } from '@hapi/protocol'
 import {
     AgentTerminalInputPayloadSchema,
@@ -1160,7 +1160,7 @@ export class ApiSessionClient extends EventEmitter {
         })
     }
 
-    sendSessionEvent(event: {
+    sendSessionEvent(event: ExecutionObservation | {
         type: 'switch'
         mode: 'local' | 'remote'
     } | {
@@ -1199,9 +1199,10 @@ export class ApiSessionClient extends EventEmitter {
         this.emitOrQueue(() => {
             this.socket.emit('message', {
                 sid: this.sessionId,
-                message: content
+                message: content,
+                ...(event.type === 'execution' ? { localId: id } : {})
             })
-        }, event.type === 'message' || event.type === 'error' || event.type === 'compact-summary' ? 'lossless' : 'droppable')
+        }, event.type === 'execution' || event.type === 'message' || event.type === 'error' || event.type === 'compact-summary' ? 'lossless' : 'droppable')
     }
 
     emitAgentTerminalOutput(data: string): void {

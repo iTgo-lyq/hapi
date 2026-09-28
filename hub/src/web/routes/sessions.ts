@@ -1,5 +1,6 @@
 import {
     CursorMigrateToAcpRequestSchema,
+    InterruptExecutionRequestSchema,
     DeleteUploadRequestSchema,
     ForkConversationRequestSchema,
     ImplementCodexPlanRequestSchema,
@@ -348,6 +349,19 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
                 error: error instanceof Error ? error.message : 'Failed to delete upload'
             }, 500)
         }
+    })
+
+    app.post('/sessions/:id/execution/interrupt', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+        const access = requireSessionFromParam(c, engine, { requireActive: true })
+        if (access instanceof Response) return access
+        if (access.session.metadata?.capabilities?.execution !== 1) {
+            return c.json({ error: 'Session does not support targeted execution control; update the runner', code: 'execution_capability_missing' }, 409)
+        }
+        const parsed = InterruptExecutionRequestSchema.safeParse(await c.req.json().catch(() => null))
+        if (!parsed.success) return c.json({ error: 'inputLocalId and executionId are required' }, 400)
+        return c.json(await engine.interruptExecution(access.sessionId, parsed.data))
     })
 
     app.post('/sessions/:id/abort', async (c) => {

@@ -5,6 +5,7 @@ import { registerGeneratedImageFromPath } from '@/modules/common/generatedImages
 import { AppServerEventConverter } from '../utils/appServerEventConverter';
 import { record, string } from './gateway';
 import { codexPlanProposalId } from './plan';
+import { codexExecutionId, type ExecutionObservation } from '@hapi/protocol';
 
 export function inputText(input: unknown): string {
     if (!Array.isArray(input)) return '';
@@ -48,6 +49,17 @@ export class SharedCodexProjection {
     }
 
     turnFor(id: string): string | undefined { return this.turns.get(id); }
+    inputsFor(turnId: string): string[] { return [...this.turns].filter(([, turn]) => turn === turnId).map(([id]) => id); }
+    private execution(turnId: string, phase: ExecutionObservation['phase'], ids: string[], nativeResult?: Record<string, unknown>): void {
+        if (this.parentThreadId || !ids.length) return;
+        const key = `execution:${turnId}:${phase}:${phase === 'accepted' ? ids.join(',') : ''}`;
+        if (this.emitted.has(key)) return;
+        this.emitted.add(key);
+        this.session.sendSessionEvent({ type: 'execution', version: 1, runtime: 'codex',
+            executionId: codexExecutionId(this.threadId, turnId), inputLocalIds: ids, phase, source: 'native',
+            nativeSessionId: this.threadId, nativeTurnId: turnId, ...(nativeResult ? { nativeResult } : {})
+        }, `codex:${this.threadId}:${key}`);
+    }
     reset(): void { this.converter = new AppServerEventConverter(); this.emitted.clear(); }
     private send(body: Record<string, unknown>, key: string): void {
         if (this.emitted.has(key)) return;
@@ -109,6 +121,7 @@ export class SharedCodexProjection {
             if (id) {
                 const firstInTurn = turnId ? [...this.turns].find(([, value]) => value === turnId)?.[0] : undefined;
                 if (turnId) this.turns.set(id, turnId);
+                if (turnId) this.execution(turnId, 'accepted', [id]);
                 await this.committed(id);
                 const text = inputText(item.content);
                 if (text) this.session.sendUserMessage(text, undefined, id);
@@ -116,6 +129,12 @@ export class SharedCodexProjection {
                     ...(turnId && (!firstInTurn || firstInTurn === id) ? { conversationHistoryPoints: { ...metadata.conversationHistoryPoints, [id]: true } } : {})
                 }));
             }
+        }
+        if (!this.parentThreadId && method === 'turn/completed' && turnId) {
+            const turn = record(p.turn);
+            const phase = turn.status === 'completed' ? 'completed' : turn.status === 'failed' ? 'failed'
+                : turn.status === 'interrupted' ? 'interrupted' : 'unknown';
+            this.execution(turnId, phase, this.inputsFor(turnId), { status: turn.status, error: turn.error ?? null });
         }
         if (this.parentThreadId && (method === 'turn/started' || method === 'turn/completed')) {
             this.send({ type: 'agent-run-update', agentId: this.threadId, cardId: `codex-agent:${this.threadId}`,
@@ -206,6 +225,7 @@ export class SharedCodexProjection {
                     await this.project('item/completed', params);
                 }
             }
+            if (!this.parentThreadId && turn.status !== 'inProgress') await this.project('turn/completed', { threadId: this.threadId, turn });
         }
         // Repair sessions created while remote title projection was missing.
         // Recheck inside the metadata lock: live updates may still be queued,

@@ -255,6 +255,7 @@ function createWebApp(options: {
         capabilities: {
             workGraph: true,
             spawnReceipts: 1,
+            execution: 1,
             titleSuggestion: readTitleProviderConfig() !== null
         }
     }))

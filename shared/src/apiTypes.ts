@@ -640,6 +640,7 @@ export type QueuedStateResponse = {
 }
 
 export const SpawnSessionRequestSchema = z.object({
+    requestId: z.string().uuid().optional(),
     directory: z.string().min(1),
     agent: AgentFlavorSchema.optional(),
     model: z.string().optional(),
@@ -656,6 +657,23 @@ export const SpawnSessionRequestSchema = z.object({
 })
 
 export type SpawnSessionRequest = z.infer<typeof SpawnSessionRequestSchema>
+
+/** Original runner response, not evidence that a native input has completed. */
+export const SpawnReceiptSchema = z.object({
+    requestId: z.string().uuid(),
+    machineId: z.string(),
+    sessionId: z.string().uuid(),
+    createdAt: z.number(),
+    response: z.discriminatedUnion('type', [
+        z.object({ type: z.literal('success'), sessionId: z.string() }),
+        z.object({
+            type: z.literal('error'), message: z.string(), code: z.string().optional(),
+            agent: AgentFlavorSchema.optional(), childStarted: z.boolean().optional()
+        })
+    ]).nullable()
+})
+
+export type SpawnReceipt = z.infer<typeof SpawnReceiptSchema>
 
 export const MachineListDirectoryRequestSchema = z.object({
     path: z.string().min(1),

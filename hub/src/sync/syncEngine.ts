@@ -18,7 +18,8 @@ import type { ImplementCodexPlanResult } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
 import { hasConversationMessageContent, unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
 import type { Server } from 'socket.io'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { SpawnSessionRequestSchema, type SpawnReceipt, type SpawnSessionRequest } from '@hapi/protocol'
 import type { Store, CancelQueuedMessageResult } from '../store'
 import type { HapiSessionExportResult } from '@hapi/protocol/sessionExport'
 import type { RpcRegistry } from '../socket/rpcRegistry'
@@ -2162,6 +2163,42 @@ export class SyncEngine {
         this.sessionCache.applySessionConfig(sessionId, applied)
     }
 
+    getSpawnReceipt(namespace: string, machineId: string, requestId: string): SpawnReceipt | null {
+        const receipt = this.store.spawnReceipts.get(namespace, requestId)
+        return receipt?.machineId === machineId ? receipt : null
+    }
+
+    async spawnSessionWithReceipt(namespace: string, machineId: string,
+        input: SpawnSessionRequest & { requestId: string }): Promise<SpawnReceipt> {
+        // Schema order makes key ordering irrelevant and discards unknown fields.
+        // Defaults with established equivalent semantics share a fingerprint.
+        const request = SpawnSessionRequestSchema.parse(input)
+        const { requestId: _, ...params } = request
+        const fingerprint = createHash('sha256').update(JSON.stringify(Object.entries({
+            ...params, agent: params.agent ?? 'claude', yolo: params.yolo ?? false,
+            sessionType: params.sessionType ?? 'simple'
+        }).sort(([a], [b]) => a.localeCompare(b)))).digest('hex')
+        const machine = this.getMachineByNamespace(machineId, namespace)
+        if (!machine) throw new Error('Machine not found in namespace')
+        const reservation = this.store.spawnReceipts.reserve(namespace, input.requestId, machineId, fingerprint, () => {
+            const sessionId = randomUUID()
+            return this.store.sessions.getOrCreateSession(`machine-spawn:${sessionId}`, {
+                path: request.directory, host: machine.metadata?.host ?? 'unknown',
+                flavor: request.agent ?? 'claude', machineId, startedBy: 'runner', startedFromRunner: true
+            }, null, namespace, request.model, request.effort, request.modelReasoningEffort, sessionId).id
+        })
+        if (!reservation.created) return reservation.receipt
+        const sessionId = reservation.receipt.sessionId
+        this.sessionCache.refreshSession(sessionId)
+        const response = await this.spawnSession(machineId, request.directory, request.agent,
+            request.model, request.modelReasoningEffort, request.yolo, request.sessionType,
+            request.worktreeName, undefined, request.effort, request.permissionMode,
+            request.serviceTier, undefined, request.collaborationMode, request.copilotAgentMode,
+            request.startingMode, namespace, sessionId)
+        this.store.spawnReceipts.finish(namespace, input.requestId, response)
+        return { ...reservation.receipt, response }
+    }
+
     async spawnSession(
         machineId: string,
         directory: string,
@@ -2181,15 +2218,16 @@ export class SyncEngine {
         startingMode?: 'remote' | 'pty',
         // Required for fresh machine spawns so the runner stamps the HAPI id on
         // argv before the first webhook (#1911 Major: unreapable window).
-        namespace?: string
+        namespace?: string,
+        reservedSessionId?: string
     ): ReturnType<RpcGateway['spawnSession']> {
         // Fresh machine spawns historically omitted existingSessionId, so
         // buildCliArgs could not stamp --hapi-session-id / --existing-session-id.
         // A runner restart before the first webhook then left no persisted PID
         // map and no argv id — StopSession returned unknown. Preallocate the
         // hub row (same pattern as fork / OpenCode clear) and pass that id.
-        let allocatedSessionId = existingSessionId
-        let preallocated = false
+        let allocatedSessionId = reservedSessionId ?? existingSessionId
+        let preallocated = Boolean(reservedSessionId)
         if (!allocatedSessionId && namespace) {
             const machine = this.getMachineByNamespace(machineId, namespace)
                 ?? this.getMachine(machineId)

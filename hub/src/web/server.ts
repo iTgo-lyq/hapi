@@ -254,6 +254,7 @@ function createWebApp(options: {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: {
             workGraph: true,
+            spawnReceipts: 1,
             titleSuggestion: readTitleProviderConfig() !== null
         }
     }))

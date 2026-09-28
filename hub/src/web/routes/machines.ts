@@ -12,6 +12,7 @@ import type { SyncEngine } from '../../sync/syncEngine'
 import { RpcTargetMissingError } from '../../sync/rpcGateway'
 import type { WebAppEnv } from '../middleware/auth'
 import { requireMachine } from './guards'
+import { SpawnRequestConflictError } from '../../store/spawnReceiptStore'
 
 export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
@@ -99,6 +100,18 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         const startingMode = parsed.data.startingMode
         const namespace = c.get('namespace')
 
+        if (parsed.data.requestId) {
+            try {
+                return c.json(await engine.spawnSessionWithReceipt(namespace, machineId,
+                    { ...parsed.data, requestId: parsed.data.requestId }))
+            } catch (error) {
+                if (error instanceof SpawnRequestConflictError) {
+                    return c.json({ error: error.message, code: 'spawn_request_conflict', requestId: parsed.data.requestId }, 409)
+                }
+                throw error
+            }
+        }
+
         const result = await engine.spawnSession(
             machineId,
             parsed.data.directory,
@@ -119,6 +132,17 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             namespace
         )
         return c.json(result)
+    })
+
+    app.get('/machines/:id/spawn-requests/:requestId', (c) => {
+        const engine = getSyncEngine()
+        if (!engine) return c.json({ error: 'Not connected' }, 503)
+        const machineId = c.req.param('id')
+        const machine = requireMachine(c, engine, machineId)
+        if (machine instanceof Response) return machine
+        const receipt = engine.getSpawnReceipt(c.get('namespace'), machineId, c.req.param('requestId'))
+        if (!receipt) return c.json({ error: 'Spawn request not found', code: 'spawn_request_not_found' }, 404)
+        return c.json(receipt)
     })
 
     app.get('/machines/:id/agent-availability', async (c) => {

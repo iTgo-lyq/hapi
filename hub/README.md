@@ -136,7 +136,8 @@ for request/response shapes and error semantics, and `src/web/routes/` for all e
 - `GET /api/machines` - List online machines.
 - `PATCH /api/machines/:id` - Set/clear the machine display name.
 - `GET /api/machines/:id/agent-availability` - List installed/configured Agents.
-- `POST /api/machines/:id/spawn` - Spawn new session on machine.
+- `POST /api/machines/:id/spawn` - Spawn new session on machine; optional `requestId` enables [durable receipts](../docs/api/spawn-receipts.md).
+- `GET /api/machines/:id/spawn-requests/:requestId` - Look up a spawn receipt, including when the runner is offline.
 - `POST /api/machines/:id/list-directory` - Browse runner-scoped directories.
 - `POST /api/machines/:id/paths/exists` - Check if path exists.
 - `POST /api/machines/:id/restart-runner` - Request runner restart (requires an available restart path).

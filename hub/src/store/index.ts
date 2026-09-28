@@ -13,6 +13,7 @@ import { SessionStore } from './sessionStore'
 import { UserStore } from './userStore'
 import { UsageStore } from './usageStore'
 import { WorkGraphStore } from './workGraphStore'
+import { SpawnReceiptStore } from './spawnReceiptStore'
 
 export type {
     NativeDevicePlatform,
@@ -42,7 +43,7 @@ export {
     WorkGraphValidationError
 } from './workGraph'
 
-const SCHEMA_VERSION: number = 26
+const SCHEMA_VERSION: number = 27
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -55,7 +56,8 @@ const REQUIRED_TABLES = [
     'usage_events',
     'usage_scan_state',
     'events',
-    'event_links'
+    'event_links',
+    'spawn_receipts'
 ] as const
 
 export class Store {
@@ -72,6 +74,7 @@ export class Store {
     readonly scratchlist: ScratchlistStore
     readonly usage: UsageStore
     readonly workGraph: WorkGraphStore
+    readonly spawnReceipts: SpawnReceiptStore
 
     /**
      * Filesystem path of the underlying SQLite database, or ':memory:' for
@@ -126,6 +129,7 @@ export class Store {
         this.scratchlist = new ScratchlistStore(this.db)
         this.usage = new UsageStore(this.db)
         this.workGraph = new WorkGraphStore(this.db)
+        this.spawnReceipts = new SpawnReceiptStore(this.db)
     }
 
     /**
@@ -348,6 +352,7 @@ export class Store {
             23: () => this.migrateFromV23ToV24(),
             24: () => this.migrateFromV24ToV25(),
             25: () => this.migrateFromV25ToV26(),
+            26: () => this.migrateFromV26ToV27(),
         })
 
         if (currentVersion === 0) {
@@ -599,6 +604,20 @@ export class Store {
             CREATE INDEX IF NOT EXISTS idx_event_links_namespace_to
                 ON event_links(namespace, to_event_id);
         `)
+        this.migrateFromV26ToV27()
+    }
+
+    private migrateFromV26ToV27(): void {
+        this.db.exec(`CREATE TABLE IF NOT EXISTS spawn_receipts (
+            namespace TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            machine_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            response TEXT,
+            PRIMARY KEY (namespace, request_id)
+        )`)
     }
 
     private migrateLegacySchemaIfNeeded(): void {

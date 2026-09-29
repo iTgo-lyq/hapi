@@ -115,7 +115,8 @@ export class RepositoryCache {
         if (record.request.action !== 'import') return fail('repository_import_required', 'Only imports own repository cache references.')
         const snapshot = record.request.snapshot, directory = this.location(snapshot)
         const pending = (workspace: ManagedWorkspace) => Object.values(workspace.operations).some(op => ['accepted', 'running', 'unknown'].includes(op.status))
-        const changed = (workspace: ManagedWorkspace) => Object.values(workspace.results).some(result => result.resultHead !== workspace.source.baseCommit)
+        const released = (workspace: ManagedWorkspace, roundId: string, head: string) => workspace.releasedResults?.[roundId]?.resultHead === head
+        const changed = (workspace: ManagedWorkspace) => Object.values(workspace.results).some(result => result.resultHead !== workspace.source.baseCommit && !released(workspace, result.roundId, result.resultHead))
         const owned = workspaces.filter(workspace => workspace.source.snapshot?.importOperationId === record.request.operationId)
         for (const workspace of owned) {
             if (workspace.status !== 'removed' || pending(workspace)) return fail('repository_cache_in_use', 'An environment still retains this import.', workspace.environmentId)
@@ -131,7 +132,7 @@ export class RepositoryCache {
         const holders = related.filter(item => item.request.operationId !== record.request.operationId && item.retention !== 'released')
         if (holders.length) return keep('repository_other_imports', `${holders.length} other imports retain the shared cache.`, holders.map(item => item.request.operationId).join(', '))
         if (workspaces.some(workspace => workspace.status !== 'removed' || pending(workspace) || changed(workspace))) return keep('repository_retained_workspaces', 'Other environments or code results still retain this cache.')
-        // Public remove intentionally keeps refs. Only unchanged, removed environments can be discarded here.
+        // Retain unknown refs, including a ref recreated after its explicit release.
         const expected = new Map<string, Map<string, Set<string>>>()
         const allow = (repo: string, name: string, commit: string) => {
             if (!expected.has(repo)) expected.set(repo, new Map())
@@ -145,7 +146,7 @@ export class RepositoryCache {
         }
         for (const workspace of workspaces) {
             allow(this.commonDir(snapshot), `refs/hapi/workspaces/${workspace.environmentId}/base`, workspace.source.baseCommit)
-            for (const result of Object.values(workspace.results)) allow(this.commonDir(snapshot), result.resultRef, result.resultHead)
+            for (const result of Object.values(workspace.results)) if (!released(workspace, result.roundId, result.resultHead)) allow(this.commonDir(snapshot), result.resultRef, result.resultHead)
         }
         const opts = { ...options, env: { ...options.env, ...repositoryReadEnvironment } }
         for (const name of readdirSync(directory)) {

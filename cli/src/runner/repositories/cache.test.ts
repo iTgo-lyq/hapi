@@ -232,6 +232,33 @@ describe('repository cache import and worktree preparation', () => {
         expect(git(importedResult.imported!.source.commonDir, 'rev-parse', result.resultRef)).toBe(result.resultHead)
     }, 30_000)
 
+    it('retires changed caches only after precise result release, all import holders, and foreign ref checks', async () => {
+        const f = fixture(), transfer = await exported(f)
+        const a = await imported(f.target, transfer.request), b = await imported(f.target, { ...transfer.request, operationId: randomUUID() })
+        const first = await prepare(f.target, a.imported!.source), second = await prepare(f.target, b.imported!.source)
+        const sealAndRemove = async (item: typeof first) => {
+            writeFileSync(join(item.workspace.cwd, 'note'), item.roundId)
+            await f.target.workspace.request({ action: 'finalize', ...item.reference, roundId: item.roundId, attemptId: randomUUID() }); await f.target.workspace.settled()
+            const result = (await f.target.workspace.inspect(item.reference.environmentId)).results[item.roundId]!
+            const attemptId = randomUUID()
+            await f.target.workspace.request({ action: 'remove', environmentId: item.reference.environmentId, attemptId, expectedHead: result.resultHead,
+                releaseResults: [{ roundId: result.roundId, resultHead: result.resultHead }] }); await f.target.workspace.settled()
+            expect((await f.target.workspace.inspect(item.reference.environmentId)).operations[`remove:${attemptId}`]?.status).toBe('succeeded')
+            return result
+        }
+        const one = await sealAndRemove(first), common = a.imported!.source.commonDir
+        const released = await f.target.manager.request({ action: 'release', operationId: a.request.operationId })
+        expect('operation' in released && released.operation.cache?.reason?.code).toBe('repository_other_imports')
+        expect(existsSync(common)).toBe(true); expect(existsSync(second.workspace.checkout)).toBe(true)
+        await sealAndRemove(second)
+        git(common, 'update-ref', one.resultRef, one.resultHead)
+        const retained = await f.target.manager.request({ action: 'release', operationId: b.request.operationId })
+        expect('operation' in retained && retained.operation.cache?.reason?.code).toBe('repository_unknown_ref')
+        git(common, 'update-ref', '-d', one.resultRef, one.resultHead)
+        await f.target.manager.request({ action: 'release', operationId: b.request.operationId })
+        expect(existsSync(common)).toBe(false)
+    }, 30_000)
+
     it('uses the existing stop proof before unchanged sealing and removal', async () => {
         const f = fixture(); let stopped = false
         f.target = machine(join(f.root, 'target-home'), 'target', async () => { if (!stopped) throw new WorkspaceError('workspace_execution_unknown', 'No verified exit') })

@@ -22,7 +22,9 @@ export const WorkspaceRequestSchema = z.discriminatedUnion('action', [
     z.strictObject({ action: z.literal('inspect'), environmentId: id }),
     z.strictObject({ action: z.literal('finalize'), environmentId: id, preparationId: id, roundId: id, attemptId: id,
         sessionId: z.string().min(1).optional(), partial: z.boolean().default(false), unchangedHead: sha.optional() }),
-    z.strictObject({ action: z.literal('remove'), environmentId: id, attemptId: id, expectedHead: sha, discardIgnored: z.boolean().default(false) }),
+    z.strictObject({ action: z.literal('remove'), environmentId: id, attemptId: id, expectedHead: sha, discardIgnored: z.boolean().default(false),
+        releaseResults: z.array(z.strictObject({ roundId: id, resultHead: sha })).max(10000).optional()
+            .refine(values => !values || new Set(values.map(value => value.roundId)).size === values.length, 'Duplicate result rounds') }),
 ])
 export type WorkspaceRequest = z.infer<typeof WorkspaceRequestSchema>
 export type WorkspaceMutation = Exclude<WorkspaceRequest, { action: 'resolve' | 'inspect' }>
@@ -36,11 +38,13 @@ export type WorkspaceResult = z.infer<typeof WorkspaceResultSchema>
 export type WorkspaceOperation = { id: string; request: WorkspaceMutation;
     status: 'accepted' | 'running' | 'succeeded' | 'failed' | 'unknown'; createdAt: number; updatedAt: number;
     error?: WorkspaceProblem; expectedHead?: string; checkpoint?: string;
-    process?: { pid: number; marker: string | null }; startedGit?: boolean }
+    process?: { pid: number; marker: string | null }; startedGit?: boolean;
+    resultRefReleases?: Array<{ roundId: string; resultHead: string; released: boolean }> }
 export type ManagedWorkspace = {
     version: 1; environmentId: string; source: WorkspaceSource; checkout: string; cwd: string; branch: string;
     status: 'retained' | 'deleting' | 'removed'; createdAt: number;
     preparations: Record<string, WorkspacePreparation>; results: Record<string, WorkspaceResult>;
+    releasedResults?: Record<string, { resultHead: string; releasedAt: number }>;
     operations: Record<string, WorkspaceOperation>; sessions: Record<string, { preparationId: string; attemptedAt: number; rejected?: boolean }>;
 }
 export type WorkspaceResponse = { source: WorkspaceSource } | { workspace: ManagedWorkspace; operation?: WorkspaceOperation }

@@ -44,6 +44,41 @@ const finalRequest = (request: Awaited<ReturnType<typeof prepare>>['request'], s
     environmentId: request.environmentId, preparationId: request.preparationId, roundId: request.roundId, sessionId, attemptId: randomUUID(), partial: false })
 afterEach(async () => { vi.unstubAllEnvs(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 
+it('releases only explicit sealed result refs after removal and reconciles a partial release after restart', async () => {
+    const f = fixture(), first = await prepare(f)
+    writeFileSync(join(first.workspace.cwd, 'file.txt'), 'first result')
+    const finish = async (request: typeof first.request) => {
+        await f.manager.request({ action: 'finalize', environmentId: request.environmentId, preparationId: request.preparationId, roundId: request.roundId, attemptId: randomUUID() })
+        await f.manager.settled(); return (await f.manager.inspect(request.environmentId)).results[request.roundId]!
+    }
+    const a = await finish(first.request)
+    const second = await prepare(f, { source: first.request.source, environmentId: first.request.environmentId, expectedHead: a.resultHead })
+    writeFileSync(join(second.workspace.cwd, 'file.txt'), 'second result')
+    const b = await finish(second.request)
+    const remove = { action: 'remove' as const, environmentId: first.request.environmentId, attemptId: randomUUID(), expectedHead: b.resultHead,
+        releaseResults: [{ roundId: a.roundId, resultHead: b.resultHead }] }
+    await f.manager.request(remove); await f.manager.settled()
+    expect((await f.manager.inspect(remove.environmentId)).operations[`remove:${remove.attemptId}`]?.error?.code).toBe('workspace_result_mismatch')
+    expect(existsSync(first.workspace.checkout)).toBe(true)
+    remove.attemptId = randomUUID(); remove.releaseResults[0]!.resultHead = a.resultHead
+    await f.manager.request(remove); await f.manager.settled()
+    const removed = await f.manager.inspect(remove.environmentId)
+    expect(removed.status).toBe('removed'); expect(removed.releasedResults?.[a.roundId]?.resultHead).toBe(a.resultHead)
+    expect(git(f.repo, 'for-each-ref', '--format=%(refname)', a.resultRef)).toBe('')
+    expect(git(f.repo, 'rev-parse', b.resultRef)).toBe(b.resultHead)
+    expect(git(f.repo, 'rev-parse', `refs/hapi/workspaces/${remove.environmentId}/base`)).toBe(first.request.source.baseCommit)
+    // Crash after successful CAS, before persisting completion: the exact saved intent reconciles absence.
+    const operation = removed.operations[`remove:${remove.attemptId}`]!
+    operation.status = 'unknown'; operation.process = undefined; operation.resultRefReleases![0]!.released = false
+    delete removed.releasedResults![a.roundId]; removed.status = 'deleting'
+    writeFileSync(join(f.root, 'hapi/workspaces/environments', remove.environmentId, 'workspace.json'), JSON.stringify(removed))
+    const restarted = new WorkspaceManager({ home: join(f.root, 'hapi'), machineId: 'machine', pathPolicy: new MachinePathPolicy(), assertStopped: async () => {} })
+    const reconciled = await restarted.inspect(remove.environmentId)
+    expect(reconciled.operations[operation.id]?.status).toBe('succeeded')
+    expect(reconciled.releasedResults?.[a.roundId]?.resultHead).toBe(a.resultHead)
+    expect(git(f.repo, 'rev-parse', b.resultRef)).toBe(b.resultHead)
+}, 30_000)
+
 describe('machine-owned workspaces', () => {
     it('seals unused or definitively rejected preparations without inventing an execution', async () => {
         const f = fixture(), { request, workspace } = await prepare(f)

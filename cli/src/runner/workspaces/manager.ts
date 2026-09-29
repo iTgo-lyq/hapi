@@ -419,7 +419,14 @@ export class WorkspaceManager {
         if (request.expectedHead !== (latest?.resultHead ?? workspace.source.baseCommit)) return problem('workspace_head_mismatch', 'Removal must reference the last sealed result or base.')
         const baseRef = `refs/hapi/workspaces/${workspace.environmentId}/base`
         if (existsSync(workspace.checkout) && await output(workspace.source.repositoryRoot, ['rev-parse', '--verify', baseRef]) !== workspace.source.baseCommit) return problem('workspace_result_missing', 'Retained base reference is missing or changed.')
+        for (const selected of request.releaseResults ?? []) {
+            const result = workspace.results[selected.roundId]
+            if (!result || result.resultHead !== selected.resultHead || result.resultRef !== `refs/hapi/workspaces/${workspace.environmentId}/rounds/${selected.roundId}`) {
+                return problem('workspace_result_mismatch', 'Result release must match a sealed round and its exact head.')
+            }
+        }
         for (const result of Object.values(workspace.results)) {
+            if (workspace.releasedResults?.[result.roundId]?.resultHead === result.resultHead) continue
             if (await output(workspace.source.repositoryRoot, ['rev-parse', '--verify', result.resultRef]) !== result.resultHead) return problem('workspace_result_missing', 'A retained result reference is missing or changed.')
         }
         await this.source(workspace)
@@ -441,7 +448,30 @@ export class WorkspaceManager {
             await git(workspace.source.repositoryRoot, ['update-ref', '-d', `refs/heads/${workspace.branch}`, request.expectedHead], this.gitOptions(workspace, operation))
         }
         await rm(join(this.directory(workspace.environmentId), 'inputs'), { recursive: true, force: true })
+        await this.releaseResultRefs(workspace, operation, request)
         workspace.status = 'removed'
+    }
+    private async releaseResultRefs(workspace: ManagedWorkspace, operation: WorkspaceOperation, request: Remove) {
+        // Persist the exact deletion intent before CAS; an interrupted delete can be reconciled by absence.
+        operation.resultRefReleases ??= (request.releaseResults ?? []).map(value => ({ ...value, released: false }))
+        this.save(workspace)
+        for (const step of operation.resultRefReleases) {
+            const result = workspace.results[step.roundId], ref = `refs/hapi/workspaces/${workspace.environmentId}/rounds/${step.roundId}`
+            if (!result || result.resultHead !== step.resultHead || result.resultRef !== ref
+                || !request.releaseResults?.some(value => value.roundId === step.roundId && value.resultHead === step.resultHead)) {
+                return problem('workspace_result_mismatch', 'Saved release intent does not match the sealed result.')
+            }
+            const current = await git(workspace.source.repositoryRoot, ['show-ref', '--verify', '--quiet', ref], { allowFailure: true })
+            if (current.exitCode !== 0 && current.exitCode !== 1) return problem('workspace_result_unreadable', 'Unable to inspect the result reference.')
+            if (current.exitCode === 0) {
+                if (step.released || workspace.releasedResults?.[step.roundId] || await output(workspace.source.repositoryRoot, ['rev-parse', '--verify', ref]) !== step.resultHead) return problem('workspace_result_changed', 'Result reference changed or was recreated; it was retained.')
+                await git(workspace.source.repositoryRoot, ['update-ref', '-d', ref, step.resultHead], this.gitOptions(workspace, operation))
+            }
+            step.released = true
+            workspace.releasedResults ??= {}
+            workspace.releasedResults[step.roundId] ??= { resultHead: step.resultHead, releasedAt: Date.now() }
+            this.save(workspace)
+        }
     }
     async inspect(environmentId: string): Promise<ManagedWorkspace> {
         let workspace = this.read(environmentId)
@@ -472,7 +502,8 @@ export class WorkspaceManager {
                     } else if (op.request.action === 'prepare' && current.preparations[op.request.preparationId]) op.status = 'succeeded'
                     else if (op.request.action === 'remove' && !existsSync(current.checkout)
                         && !existsSync(join(this.directory(environmentId), 'inputs'))
-                        && (await git(current.source.repositoryRoot, ['show-ref', '--verify', `refs/heads/${current.branch}`], { allowFailure: true })).exitCode === 1) {
+                        && (await git(current.source.repositoryRoot, ['show-ref', '--verify', '--quiet', `refs/heads/${current.branch}`], { allowFailure: true })).exitCode === 1) {
+                        await this.releaseResultRefs(current, op, op.request)
                         current.status = 'removed'; op.status = 'succeeded'
                     } else problem('workspace_interrupted', 'Git stopped without a complete receipt; inspect the retained environment before explicitly retrying with a new attempt identity.')
                     op.error = undefined

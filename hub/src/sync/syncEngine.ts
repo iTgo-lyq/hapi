@@ -2177,6 +2177,8 @@ export class SyncEngine {
         if (!machine) return { error: { code: 'machine_not_found', message: 'Machine not found in namespace' } }
         if (!machine.active) return { error: { code: 'machine_offline', message: 'Machine is offline' } }
         if (machine.runnerState?.capabilities?.artifactTransfers !== 1) return { error: { code: 'runner_upgrade_required', message: 'Upgrade the Runner to use file transfers' } }
+        if ((request.action === 'capture' || request.action === 'deliver' || (request.action === 'release' && request.names))
+            && machine.runnerState?.capabilities?.artifactOutputs !== 1) return { error: { code: 'runner_upgrade_required', message: 'Upgrade the Runner to capture and deliver files' } }
         if (request.action === 'release' && this.getSessionsByNamespace(namespace).some(session =>
             session.metadata?.machineId === machineId && session.metadata.preparedFiles?.operationId === request.operationId
             && (session.active || session.metadata.lifecycleState !== 'archived'))) {

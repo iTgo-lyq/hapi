@@ -55,6 +55,14 @@ describe('persistent machine inputs', () => {
         await expect(f.manager.validatePrepared(f.request)).rejects.toMatchObject({ code: 'files_not_prepared' })
         await expect(f.manager.request(f.request)).rejects.toMatchObject({ code: 'artifact_inputs_released' })
     })
+    it('keeps input filenames distinct from temporary transfers, including long UTF-8 names', async () => {
+        const f = await fixture(), names = ['a.part', 'a', '长'.repeat(80)]
+        const request = { ...f.request, files: names.map(name => ({ ...f.request.files[0]!, name })) }
+        await f.manager.request(request); await f.manager.settled()
+        const record = await f.inspect(); expect(record.status).toBe('succeeded')
+        expect(record.files.map(file => readFileSync(file.path))).toEqual(names.map(() => f.bytes))
+        expect(await f.manager.validatePrepared(request)).toHaveLength(3)
+    })
     it('does not open the launch gate for corrupt, replaced or symlinked inputs', async () => {
         const f = await fixture(); f.mode('corrupt')
         await f.manager.request(f.request); await f.manager.settled()

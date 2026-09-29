@@ -1,24 +1,21 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync, constants } from 'node:fs'
 import { open, rename, rm } from 'node:fs/promises'
-import { join } from 'node:path'
-import { ArtifactSchema, ArtifactTransferRequestSchema, PreparedFilesSchema, type ArtifactProblem,
+import { dirname, isAbsolute, join } from 'node:path'
+import { ArtifactSchema, ArtifactTransferRequestSchema, PreparedFilesSchema,
     type ArtifactTransfer, type ArtifactTransferResponse, type MaterializeRequest, type MaterializedInput, type PreparedFiles } from '@hapi/protocol'
 import type { MachinePathPolicy } from '@/api/machinePathPolicy'
 
-export class TransferError extends Error {
-    constructor(readonly code: string, message: string, readonly hint?: string) { super(message) }
-}
-export const transferProblem = (error: unknown): ArtifactProblem => error instanceof TransferError
-    ? { code: error.code, message: error.message, hint: error.hint }
-    : { code: 'artifact_transfer_failed', message: error instanceof Error ? error.message : String(error) }
-const fail = (code: string, message: string): never => { throw new TransferError(code, message) }
+import { captureFile, deliverFile } from './outputs'
+import { fail, TransferError, transferProblem } from './common'
+export { TransferError, transferProblem } from './common'
 
-/** Durable machine input receipts, independent of native sessions and their scratch uploads. */
+/** Durable machine file operations, independent of native sessions and scratch uploads. */
 export class ArtifactTransferManager {
     readonly root: string
     private readonly shutdown = new AbortController()
     private readonly jobs = new Map<string, Promise<void>>()
+    private readonly deliveries = new Map<string, string>()
     private readonly locks = new Map<string, Promise<void>>()
     constructor(private readonly options: { home: string; url: string; token: string; extraHeaders?: Record<string, string>; pathPolicy: MachinePathPolicy;
         assertStopped: (id: string) => Promise<void>; idleMs?: number }) {
@@ -36,7 +33,10 @@ export class ArtifactTransferManager {
         const record = JSON.parse(readFileSync(join(directory, 'receipt.json'), 'utf8')) as ArtifactTransfer
         if (record.version !== 1 || record.request.operationId !== id || !ArtifactTransferRequestSchema.safeParse(record.request).success) return fail('artifact_receipt_invalid', 'Invalid saved file operation.')
         if (['accepted', 'running'].includes(record.status) && !this.jobs.has(id)) {
-            record.status = 'unknown'; record.error = { code: 'artifact_transfer_interrupted', message: 'Runner stopped before confirming the transfer. Retry the same materialize request.' }
+            record.status = record.request.action === 'capture' ? 'failed' : 'unknown'
+            record.error = { code: 'artifact_transfer_interrupted', message: record.request.action === 'capture'
+                ? 'Capture stopped before all files were confirmed. Preserved candidates remain usable; collect missing files with a new operation ID.'
+                : 'Runner stopped before confirming the transfer. Retry the same file operation.' }
             this.save(record)
         }
         return record
@@ -62,14 +62,26 @@ export class ArtifactTransferManager {
         const request = parsed.data, id = request.operationId
         if (request.action === 'inspect') return { operation: this.read(id) }
         if (this.shutdown.signal.aborted) return fail('artifact_runner_stopping', 'Runner is stopping; inspect after reconnecting.')
-        return this.serial(id, async () => {
+        if (request.action === 'deliver' && request.captureOperationId === id) return fail('artifact_request_invalid', 'Delivery and capture require different operation IDs.')
+        const accept = async () => {
             if (request.action === 'release') {
                 const record = this.read(id)
-                if (this.jobs.has(id)) return fail('artifact_operation_pending', 'Wait for the file transfer before releasing its inputs.')
+                if (this.jobs.has(id) || [...this.deliveries.values()].includes(id)) return fail('artifact_operation_pending', 'Wait for file operations before releasing their local files.')
                 for (const session of record.sessions) await this.options.assertStopped(session)
+                if (request.names && record.request.action !== 'capture') return fail('artifact_request_invalid', 'Selective release requires a capture operation.')
                 if (record.retention !== 'released') {
+                    if (record.request.action === 'capture') {
+                        const names = request.names ?? record.candidates?.map(file => file.name) ?? []
+                        if (names.some(name => !record.candidates?.some(file => file.name === name))) return fail('artifact_candidate_missing', 'No captured item has the requested name.')
+                        for (const candidate of record.candidates ?? []) if (names.includes(candidate.name) && candidate.status === 'captured') {
+                            await rm(this.candidatePath(record, candidate.name), { force: true })
+                            candidate.retention = 'released'; record.updatedAt = Date.now(); this.save(record)
+                        }
+                        if (record.candidates?.some(file => file.status === 'captured' && file.retention === 'retained')) return { operation: record }
+                    }
                     record.retention = 'releasing'; this.save(record)
                     await rm(join(this.directory(id), 'inputs'), { recursive: true, force: true })
+                    await rm(join(this.directory(id), 'spool'), { recursive: true, force: true })
                     record.retention = 'released'; record.updatedAt = Date.now(); this.save(record)
                 }
                 return { operation: record }
@@ -77,45 +89,107 @@ export class ArtifactTransferManager {
             let record: ArtifactTransfer
             if (existsSync(join(this.directory(id), 'receipt.json'))) {
                 record = this.read(id)
-                if (JSON.stringify(record.request) !== JSON.stringify(request)) return fail('artifact_request_conflict', 'This operation ID already has different inputs.')
-                if (record.retention !== 'retained') return fail('artifact_inputs_released', 'Released inputs cannot be restored with the same operation ID.')
-                if (this.jobs.has(id) || record.status === 'succeeded') return { operation: record }
+                if (JSON.stringify(record.request) !== JSON.stringify(request)) return fail('artifact_request_conflict', 'This operation ID already has different arguments.')
+                if (record.retention !== 'retained' && request.action !== 'capture') return fail('artifact_inputs_released', 'Released files cannot be restored with the same operation ID.')
+                if (this.jobs.has(id) || record.status === 'succeeded' || request.action === 'capture') return { operation: record }
                 for (const session of record.sessions) await this.options.assertStopped(session)
             } else {
                 if (existsSync(this.directory(id))) return fail('artifact_ownership_changed', 'Existing directory has no matching operation receipt.')
-                if (!await this.options.pathPolicy.allowsSpawn(this.directory(id))) return fail('outside_workspace_roots', 'File input storage is outside configured Runner roots.')
+                if (!await this.options.pathPolicy.allowsSpawn(this.directory(id))) return fail('outside_workspace_roots', 'File storage is outside configured Runner roots.')
+                if (request.action === 'capture') {
+                    if (!isAbsolute(request.cwd) || !await this.options.pathPolicy.allowsBrowse(request.cwd)) return fail('outside_workspace_roots', 'Capture requires an allowed absolute workspace directory.')
+                }
                 record = { version: 1, request, status: 'accepted', retention: 'retained', files: [], sessions: [], createdAt: Date.now(), updatedAt: Date.now() }
+                if (request.action === 'capture') record.candidates = request.files.map(file => ({ ...file, status: 'failed',
+                    error: { code: 'artifact_capture_interrupted', message: 'This file has not been captured. Collect it again if the operation stops.' } }))
+            }
+            if (request.action === 'deliver') {
+                const capture = this.read(request.captureOperationId)
+                if (capture.request.action !== 'capture' || this.jobs.has(request.captureOperationId)) return fail('artifact_capture_pending', 'Delivery requires a finished capture operation.')
+                for (const input of request.files) {
+                    if (!capture.candidates?.some(file => file.name === input.name && file.status === 'captured')) return fail('artifact_candidate_missing', 'A selected file has no captured candidate. Use a new capture to collect it.')
+                }
             }
             record.status = 'accepted'; record.error = undefined; record.updatedAt = Date.now(); this.save(record)
             const accepted = structuredClone(record)
-            const job = Promise.resolve().then(() => this.materialize(record)).finally(() => this.jobs.delete(id))
+            if (request.action === 'deliver') this.deliveries.set(id, request.captureOperationId)
+            const job = Promise.resolve().then(() => this.run(record)).finally(() => { this.jobs.delete(id); this.deliveries.delete(id) })
             this.jobs.set(id, job)
-            void job.catch(() => {}) // An unconfirmed final receipt becomes unknown on inspect; never infer success.
+            void job.catch(() => {}) // A lost final receipt remains queryable; never infer success.
             return { operation: accepted }
-        })
+        }
+        if (request.action === 'deliver') {
+            const [first, second] = [id, request.captureOperationId].sort()
+            return this.serial(first!, () => this.serial(second!, accept))
+        }
+        return this.serial(id, accept)
     }
-    private async materialize(record: ArtifactTransfer) {
+    private candidatePath(record: ArtifactTransfer, name: string) {
+        const candidate = record.candidates?.find(file => file.name === name)
+        const expected = join(this.directory(record.request.operationId), 'spool', createHash('sha256').update(name).digest('hex'))
+        if (!candidate || candidate.status !== 'captured' || candidate.path !== expected) return fail('artifact_receipt_invalid', 'Captured path does not belong to this operation.')
+        return expected
+    }
+    private async run(record: ArtifactTransfer) {
         record.status = 'running'; this.save(record)
         try {
-            const directory = join(this.directory(record.request.operationId), 'inputs')
-            mkdirSync(directory, { recursive: true, mode: 0o700 })
-            if (realpathSync(directory) !== directory) return fail('artifact_ownership_changed', 'Input directory was replaced.')
-            record.files = []
-            for (const input of record.request.files) {
-                const path = join(directory, input.name)
-                await this.download(input, path)
-                record.files.push({ ...input, path }); record.updatedAt = Date.now(); this.save(record)
-            }
-            record.status = 'succeeded'; record.error = undefined
+            if (record.request.action === 'materialize') await this.materialize(record)
+            else if (record.request.action === 'capture') await this.capture(record)
+            else await this.deliver(record)
+            const errors = [...(record.candidates ?? []), ...(record.deliveries ?? [])].filter(file => file.status === 'failed')
+            record.status = errors.length ? 'failed' : 'succeeded'
+            record.error = errors.length ? { code: 'artifact_partial_failure', message: 'Some files were not captured or delivered. Inspect individual items.' } : undefined
         } catch (error) { record.status = 'failed'; record.error = transferProblem(error) }
         record.updatedAt = Date.now(); this.save(record)
+    }
+    private async capture(record: ArtifactTransfer) {
+        if (record.request.action !== 'capture') return fail('artifact_request_invalid', 'Capture request required.')
+        const cwd = realpathSync(record.request.cwd), directory = join(this.directory(record.request.operationId), 'spool')
+        if (!await this.options.pathPolicy.allowsBrowse(cwd)) return fail('outside_workspace_roots', 'Capture workspace is outside Runner roots.')
+        mkdirSync(directory, { recursive: true, mode: 0o700 })
+        if (realpathSync(directory) !== directory) return fail('artifact_ownership_changed', 'Capture directory was replaced.')
+        for (const [index, input] of record.request.files.entries()) {
+            this.shutdown.signal.throwIfAborted()
+            try { record.candidates![index] = await captureFile(cwd, input, join(directory, createHash('sha256').update(input.name).digest('hex')), this.shutdown.signal) }
+            catch (error) { record.candidates![index] = { ...input, status: 'failed', error: error instanceof Error && 'code' in error && error.code === 'ENOENT'
+                ? { code: 'artifact_output_missing', message: `Declared output does not exist: ${input.relativePath}` } : transferProblem(error) } }
+            record.updatedAt = Date.now(); this.save(record)
+        }
+    }
+    private async deliver(record: ArtifactTransfer) {
+        if (record.request.action !== 'deliver') return fail('artifact_request_invalid', 'Delivery request required.')
+        const capture = this.read(record.request.captureOperationId)
+        record.deliveries = []
+        for (const input of record.request.files) {
+            this.shutdown.signal.throwIfAborted()
+            const candidate = capture.candidates?.find(file => file.name === input.name)
+            try {
+                if (!candidate || candidate.status !== 'captured') return fail('artifact_candidate_missing', 'No captured candidate exists.')
+                this.candidatePath(capture, input.name)
+                const artifact = await deliverFile(candidate, input, { ...this.options, signal: this.shutdown.signal })
+                record.deliveries.push({ name: input.name, status: 'available', artifact })
+            } catch (error) { record.deliveries.push({ name: input.name, status: 'failed', error: transferProblem(error) }) }
+            record.updatedAt = Date.now(); this.save(record)
+        }
+    }
+    private async materialize(record: ArtifactTransfer) {
+        if (record.request.action !== 'materialize') return fail('artifact_request_invalid', 'Materialize request required.')
+        const directory = join(this.directory(record.request.operationId), 'inputs')
+        mkdirSync(directory, { recursive: true, mode: 0o700 })
+        if (realpathSync(directory) !== directory) return fail('artifact_ownership_changed', 'Input directory was replaced.')
+        record.files = []
+        for (const input of record.request.files) {
+            const path = join(directory, input.name)
+            await this.download(input, path)
+            record.files.push({ ...input, path }); record.updatedAt = Date.now(); this.save(record)
+        }
     }
     private async download(input: MaterializeRequest['files'][number], path: string) {
         const idle = new AbortController(), signal = AbortSignal.any([idle.signal, this.shutdown.signal])
         let timer: ReturnType<typeof setTimeout>
         const tick = () => { clearTimeout(timer); timer = setTimeout(() => idle.abort(new TransferError('artifact_transfer_idle', 'File download stopped making progress.')), this.options.idleMs ?? 60_000) }
         tick()
-        const temporary = `${path}.part`, headers = { ...this.options.extraHeaders, authorization: `Bearer ${this.options.token}` }
+        const temporary = join(dirname(path), `.part-${randomUUID()}`), headers = { ...this.options.extraHeaders, authorization: `Bearer ${this.options.token}` }
         let file: Awaited<ReturnType<typeof open>> | undefined, reader: Pick<ReadableStreamDefaultReader<Uint8Array>, 'read' | 'cancel' | 'releaseLock'> | undefined
         try {
             const base = `${this.options.url.replace(/\/$/, '')}/cli/artifacts/${input.artifactId}`
@@ -148,7 +222,7 @@ export class ArtifactTransferManager {
     }
     async validatePrepared(reference: PreparedFiles): Promise<MaterializedInput[]> {
         const record = this.read(reference.operationId)
-        if (record.status !== 'succeeded' || record.retention !== 'retained' || record.files.length !== record.request.files.length) return fail('files_not_prepared', 'Input preparation is missing, incomplete or released.')
+        if (record.request.action !== 'materialize' || record.status !== 'succeeded' || record.retention !== 'retained' || record.files.length !== record.request.files.length) return fail('files_not_prepared', 'Input preparation is missing, incomplete or released.')
         for (const input of record.files) {
             const expected = join(this.directory(reference.operationId), 'inputs', input.name)
             if (input.path !== expected || realpathSync(input.path) !== expected || !lstatSync(input.path).isFile()) return fail('files_not_prepared', 'Prepared input path was replaced.')

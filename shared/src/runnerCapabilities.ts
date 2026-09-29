@@ -19,6 +19,7 @@ export const RUNNER_CAPABILITIES = {
     mcpToolFilter: true as const,
     managedWorkspaces: 1 as const,
     artifactTransfers: 1 as const,
+    artifactOutputs: 1 as const,
     agentAvailabilityDetails: true as const,
     piExistingSessionResume: true as const,
     agentConfigs: getBuiltinAgentConfigDescriptors()

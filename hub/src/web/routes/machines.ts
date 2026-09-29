@@ -28,7 +28,7 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         const parsed = ArtifactTransferRequestSchema.safeParse(await c.req.json().catch(() => null))
         if (!parsed.success) return c.json({ error: 'Invalid file operation' }, 400)
         const result = await engine.artifactOperation(machineId, c.get('namespace'), parsed.data)
-        if ('error' in result) return c.json({ error: result.error.message, code: result.error.code }, 409)
+        if ('error' in result) return c.json({ error: result.error.message, code: result.error.code, hint: result.error.hint }, 409)
         return c.json(result)
     })
 

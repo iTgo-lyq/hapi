@@ -99,4 +99,39 @@ Shared-directory spawn and resume can supply `preparedFiles: {operationId}`. The
 
 A resumed session keeps its previous `preparedFiles` when omitted, accepts a new reference for the next input set, or accepts explicit `null` to clear the binding. Definite input rejection preserves the archived state and original binding. Native bootstrap and sparse metadata updates retain the Hub-owned preparation reference. Machine files do not change the behavior of sessions without a preparation gate.
 
-Output capture and delivery are not implemented by this API yet.
+## Captured outputs
+
+The same machine endpoint accepts output operations when the Runner advertises
+`artifactOutputs: 1`; an older input-only Runner is rejected before dispatch.
+These operations never start a model or run Git commands. The caller confirms
+native execution has stopped before collecting its outputs.
+
+- `capture`: `{action, operationId, cwd, files:[{name,relativePath}]}` captures
+  only declared regular files inside an allowed absolute workspace. Logical
+  names are unique safe filenames; paths reject absolute paths, traversal and
+  escaping symlinks. Each file is copied from one open descriptor into the
+  operation's `spool`, hashed and checked for changes during capture. Candidates
+  record `capturedAt`, size/hash and per-item errors. Directory contents are not
+  recursively uploaded. Spool files remain independent of the source workspace.
+- `deliver`: `{action, operationId, captureOperationId,
+  files:[{name,requestId,reference:{reference,purpose}}]}` reserves and pins each
+  selected candidate in the configured Hub, then streams the fixed bytes. Upload
+  identities are supplied by the caller and remain stable across retries. Receipts
+  expose per-item `available` objects or errors. Missing capture items require a
+  new explicit capture; delivery never reads the original workspace path.
+- `inspect` returns the saved capture candidates or delivery results. Repeating
+  a capture never reads newer source bytes, including after Runner restart.
+  Interrupted captures become partial failures: confirmed candidates remain,
+  while uncaptured entries require a new operation. A failed/unknown delivery can
+  be retried with its identical request. Already published objects are recovered
+  from the original reservation without uploading again.
+- `release` accepts optional `names` for a capture, allowing only acknowledged
+  successful candidates to be removed while unsuccessful candidates remain.
+  It refuses active capture/delivery operations. Without names it releases all
+  of that operation's local files. Receipts remain, and Hub pins are unchanged.
+
+Callers publish their own immutable manifests after checking Hub object/pin
+facts, and only then release the corresponding spool candidates. Partial errors
+are explicit; a successful item remains downloadable when another item fails.
+Delivery uses the existing Runner CLI token and extra authentication headers,
+a 60-second idle timeout, and no total streaming deadline.

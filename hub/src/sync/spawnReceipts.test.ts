@@ -22,7 +22,7 @@ function setup(path = ':memory:') {
     cleanup.push(() => { engine.stop(); store.close() })
     for (const [id, namespace] of [['machine', 'default'], ['other', 'default'], ['foreign', 'tenant']]) {
         engine.getOrCreateMachine(id!, { host: 'local', platform: 'linux', happyCliVersion: '0.30.7',
-            capabilities: [MACHINE_CAPABILITIES.AgentAvailability] }, { status: 'running', capabilities: { mcpToolFilter: true, managedWorkspaces: 1, artifactTransfers: 1 } }, namespace!)
+            capabilities: [MACHINE_CAPABILITIES.AgentAvailability] }, { status: 'running', capabilities: { mcpToolFilter: true, managedWorkspaces: 1, artifactTransfers: 1, artifactOutputs: 1 } }, namespace!)
         engine.handleMachineAlive({ machineId: id!, time: Date.now() })
     }
     const gateway = (engine as unknown as { rpcGateway: RpcGateway }).rpcGateway
@@ -317,5 +317,23 @@ it('routes machine file operations within namespace and rejects release while an
     expect(calls).toEqual([['machine', { action: 'inspect', operationId }]])
     engine.getOrCreateSession('files-active', { path: '/workspace', host: 'local', machineId: 'machine', flavor: 'codex', preparedFiles: { operationId } }, null, 'default')
     expect(await (await post('machine', { action: 'release', operationId })).json()).toMatchObject({ code: 'artifact_execution_active' })
+    expect(calls).toHaveLength(1)
+})
+
+it('gates output operations on Runner support and forwards declared candidates without a native session', async () => {
+    const { engine, gateway } = setup(), calls: unknown[] = []
+    engine.getOrCreateMachine('input-only', { host: 'local', platform: 'linux', happyCliVersion: 'old' },
+        { status: 'running', capabilities: { artifactTransfers: 1 } }, 'default')
+    engine.handleMachineAlive({ machineId: 'input-only', time: Date.now() })
+    gateway.artifactOperation = async (machine, request) => { calls.push([machine, request]); return { error: { code: 'fixture', message: 'Captured dispatch', hint: 'Inspect it' } } }
+    const app = new Hono<WebAppEnv>(); app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() }); app.route('/api', createMachinesRoutes(() => engine))
+    const request = { action: 'capture', operationId: crypto.randomUUID(), cwd: '/workspace', files: [{ name: '报告.txt', relativePath: 'out/报告.txt' }] }
+    const post = (machine: string, body: unknown) => app.request(`/api/machines/${machine}/artifacts`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    expect(await (await post('input-only', request)).json()).toMatchObject({ code: 'runner_upgrade_required' })
+    expect((await post('foreign', request)).status).toBe(403)
+    expect(calls).toHaveLength(0)
+    expect(await (await post('machine', request)).json()).toMatchObject({ code: 'fixture', hint: 'Inspect it' })
+    expect(calls).toEqual([['machine', request]])
+    expect((await post('machine', { ...request, files: [{ name: 'escape', relativePath: '../escape' }] })).status).toBe(400)
     expect(calls).toHaveLength(1)
 })

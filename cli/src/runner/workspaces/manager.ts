@@ -310,8 +310,12 @@ export class WorkspaceManager {
     private async finalize(workspace: ManagedWorkspace, operation: WorkspaceOperation, request: Finalize) {
         await this.validate(workspace); await this.noGitOperation(workspace)
         const preparation = workspace.preparations[request.preparationId]
-        if (!preparation || preparation.roundId !== request.roundId || !workspace.sessions[request.sessionId]
-            || workspace.sessions[request.sessionId]?.preparationId !== request.preparationId) return problem('workspace_preparation_mismatch', 'Result does not belong to the prepared execution.')
+        if (!preparation || preparation.roundId !== request.roundId) return problem('workspace_preparation_mismatch', 'Result does not belong to the prepared round.')
+        if (request.sessionId) {
+            if (workspace.sessions[request.sessionId]?.preparationId !== request.preparationId) return problem('workspace_preparation_mismatch', 'Result does not belong to the prepared execution.')
+        } else if (Object.values(workspace.sessions).some(session => session.preparationId === request.preparationId && !session.rejected)) {
+            return problem('workspace_execution_identity_required', 'This preparation has an execution; provide its session identity and stop it before sealing.')
+        }
         const existing = workspace.results[request.roundId]
         if (existing) return
         const options = this.gitOptions(workspace, operation)

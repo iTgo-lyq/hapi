@@ -45,6 +45,31 @@ const finalRequest = (request: Awaited<ReturnType<typeof prepare>>['request'], s
 afterEach(async () => { vi.unstubAllEnvs(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 
 describe('machine-owned workspaces', () => {
+    it('seals unused or definitively rejected preparations without inventing an execution', async () => {
+        const f = fixture(), { request, workspace } = await prepare(f)
+        const unused = { action: 'finalize' as const, environmentId: request.environmentId, preparationId: request.preparationId,
+            roundId: request.roundId, attemptId: randomUUID(), partial: true }
+        await f.manager.request(unused); await f.manager.settled()
+        const first = (await f.manager.inspect(request.environmentId)).results[request.roundId]!
+        expect(first).toMatchObject({ resultHead: request.expectedHead, fileCount: 0, partial: true })
+        expect(first.checkpoint).toBeUndefined()
+        await expect(f.manager.validatePrepared(request, workspace.cwd)).rejects.toMatchObject({ code: 'workspace_preparation_expired' })
+        const next = { ...request, preparationId: randomUUID(), roundId: randomUUID() }
+        await f.manager.request(next); await f.manager.settled()
+        await f.manager.launch(next, workspace.cwd, randomUUID(), async () => ({ type: 'error', childStarted: false }))
+        await f.manager.request({ ...unused, preparationId: next.preparationId, roundId: next.roundId, attemptId: randomUUID() }); await f.manager.settled()
+        expect((await f.manager.inspect(request.environmentId)).results[next.roundId]?.resultHead).toBe(first.resultHead)
+        const active = { ...request, preparationId: randomUUID(), roundId: randomUUID() }
+        await f.manager.request(active); await f.manager.settled()
+        const sessionId = await started(f, await f.manager.inspect(request.environmentId), active.preparationId)
+        const missingIdentity = { ...unused, preparationId: active.preparationId, roundId: active.roundId, attemptId: randomUUID() }
+        await f.manager.request(missingIdentity); await f.manager.settled()
+        const rejected = await f.manager.inspect(request.environmentId)
+        expect(rejected.operations[`finalize:${active.roundId}:${missingIdentity.attemptId}`]?.error?.code).toBe('workspace_execution_identity_required')
+        expect(rejected.results[active.roundId]).toBeUndefined()
+        await f.manager.request(finalRequest(active, sessionId)); await f.manager.settled()
+        expect((await f.manager.inspect(request.environmentId)).results[active.roundId]?.resultHead).toBe(first.resultHead)
+    })
     it('freezes a committed subdirectory base and checkpoints without changing parent state', async () => {
         const f = fixture(), base = git(f.repo, 'rev-parse', 'HEAD')
         writeFileSync(join(f.repo, 'app/file.txt'), 'parent staged\n'); git(f.repo, 'add', '.')

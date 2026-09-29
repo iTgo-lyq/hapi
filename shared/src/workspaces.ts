@@ -19,7 +19,7 @@ export const WorkspaceRequestSchema = z.discriminatedUnion('action', [
         source: WorkspaceSourceSchema, expectedHead: sha, inputs: z.array(input).max(100).default([]) }),
     z.strictObject({ action: z.literal('inspect'), environmentId: id }),
     z.strictObject({ action: z.literal('finalize'), environmentId: id, preparationId: id, roundId: id, attemptId: id,
-        sessionId: z.string().min(1), partial: z.boolean().default(false) }),
+        sessionId: z.string().min(1).optional(), partial: z.boolean().default(false) }),
     z.strictObject({ action: z.literal('remove'), environmentId: id, attemptId: id, expectedHead: sha, discardIgnored: z.boolean().default(false) }),
 ])
 export type WorkspaceRequest = z.infer<typeof WorkspaceRequestSchema>

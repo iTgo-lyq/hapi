@@ -7,7 +7,7 @@
  * - No E2E encryption; data is stored as JSON in SQLite
  */
 
-import type { PreparedWorkspace, WorkspaceRequest } from '@hapi/protocol'
+import type { PreparedWorkspace, PreparedFiles, ArtifactTransferRequest, WorkspaceRequest } from '@hapi/protocol'
 import { isKnownFlavor, isLiveLifecycleState, isSteeringSupportedForSession, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
 import {
     cliBinaryUpdatedOnDisk,
@@ -104,11 +104,11 @@ export type {
 
 export type ResumeSessionResult =
     | { type: 'success'; sessionId: string }
-    | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'no_machine_online' | 'resume_unavailable' | 'resume_failed' | 'native_session_missing' | 'workspace_not_prepared'; childStarted?: boolean; rollbackSafe?: boolean }
+    | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'no_machine_online' | 'resume_unavailable' | 'resume_failed' | 'native_session_missing' | 'workspace_not_prepared' | 'files_not_prepared'; childStarted?: boolean; rollbackSafe?: boolean }
 
 export type ReopenSessionResult =
     | { type: 'success'; sessionId: string; resumed: boolean; cursorSessionProtocol?: 'acp' | 'stream-json' }
-    | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'no_machine_online' | 'resume_unavailable' | 'resume_failed' | 'native_session_missing' | 'metadata_conflict' | 'workspace_not_prepared' }
+    | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'no_machine_online' | 'resume_unavailable' | 'resume_failed' | 'native_session_missing' | 'metadata_conflict' | 'workspace_not_prepared' | 'files_not_prepared' }
     | { type: 'incomplete'; message: string; missing: [string, ...string[]] }
 
 export type LocalResumeTargetResult =
@@ -2172,6 +2172,19 @@ export class SyncEngine {
         this.sessionCache.applySessionConfig(sessionId, applied)
     }
 
+    async artifactOperation(machineId: string, namespace: string, request: ArtifactTransferRequest) {
+        const machine = this.getMachineByNamespace(machineId, namespace)
+        if (!machine) return { error: { code: 'machine_not_found', message: 'Machine not found in namespace' } }
+        if (!machine.active) return { error: { code: 'machine_offline', message: 'Machine is offline' } }
+        if (machine.runnerState?.capabilities?.artifactTransfers !== 1) return { error: { code: 'runner_upgrade_required', message: 'Upgrade the Runner to use file transfers' } }
+        if (request.action === 'release' && this.getSessionsByNamespace(namespace).some(session =>
+            session.metadata?.machineId === machineId && session.metadata.preparedFiles?.operationId === request.operationId
+            && (session.active || session.metadata.lifecycleState !== 'archived'))) {
+            return { error: { code: 'artifact_execution_active', message: 'Archive executions using these inputs before releasing them' } }
+        }
+        return this.rpcGateway.artifactOperation(machineId, request)
+    }
+
     async workspaceOperation(machineId: string, namespace: string, request: WorkspaceRequest) {
         const machine = this.getMachineByNamespace(machineId, namespace)
         if (!machine) return { error: { code: 'machine_not_found', message: 'Machine not found in namespace' } }
@@ -2212,7 +2225,7 @@ export class SyncEngine {
             return this.store.sessions.getOrCreateSession(`machine-spawn:${sessionId}`, {
                 path: request.directory, host: machine.metadata?.host ?? 'unknown',
                 flavor: request.agent ?? 'claude', machineId, startedBy: 'runner', startedFromRunner: true,
-                disabledMcpServers: request.disabledMcpServers, preparedWorkspace: request.preparedWorkspace
+                disabledMcpServers: request.disabledMcpServers, preparedWorkspace: request.preparedWorkspace, preparedFiles: request.preparedFiles
             }, null, namespace, request.model, request.effort, request.modelReasoningEffort, sessionId).id
         })
         if (!reservation.created) return reservation.receipt
@@ -2222,7 +2235,7 @@ export class SyncEngine {
             request.model, request.modelReasoningEffort, request.yolo, request.sessionType,
             request.worktreeName, undefined, request.effort, request.permissionMode,
             request.serviceTier, undefined, request.collaborationMode, request.copilotAgentMode,
-            request.startingMode, namespace, sessionId, request.disabledMcpServers, request.preparedWorkspace)
+            request.startingMode, namespace, sessionId, request.disabledMcpServers, request.preparedWorkspace, request.preparedFiles)
         this.store.spawnReceipts.finish(namespace, input.requestId, response)
         return { ...reservation.receipt, response }
     }
@@ -2249,7 +2262,8 @@ export class SyncEngine {
         namespace?: string,
         reservedSessionId?: string,
         disabledMcpServers?: string[],
-        preparedWorkspace?: PreparedWorkspace
+        preparedWorkspace?: PreparedWorkspace,
+        preparedFiles?: PreparedFiles
     ): ReturnType<RpcGateway['spawnSession']> {
         // Fresh machine spawns historically omitted existingSessionId, so
         // buildCliArgs could not stamp --hapi-session-id / --existing-session-id.
@@ -2273,6 +2287,7 @@ export class SyncEngine {
                     startedFromRunner: true,
                     disabledMcpServers,
                     preparedWorkspace,
+                    preparedFiles,
                 },
                 null,
                 namespace,
@@ -2287,12 +2302,14 @@ export class SyncEngine {
         let result: Awaited<ReturnType<RpcGateway['spawnSession']>>
         try {
             const machine = namespace ? this.getMachineByNamespace(machineId, namespace) : this.getMachine(machineId)
+            const filesError = preparedFiles && (preparedWorkspace || machine?.runnerState?.capabilities?.artifactTransfers !== 1)
             const workspaceError = preparedWorkspace && machine?.runnerState?.capabilities?.managedWorkspaces !== 1
             const filterError = disabledMcpServers?.length
                 ? !['codex', 'claude'].includes(agent) ? 'MCP tool filtering is only supported for Codex and Claude'
                     : machine?.runnerState?.capabilities?.mcpToolFilter !== true ? 'MCP tool filtering requires an upgraded runner' : null
                 : null
-            result = workspaceError ? { type: 'error', message: 'Prepared workspaces require an upgraded runner', code: 'workspace_not_prepared', childStarted: false }
+            result = filesError ? { type: 'error', message: 'Prepared files require an upgraded runner and shared workspace mode', code: 'files_not_prepared', childStarted: false }
+                : workspaceError ? { type: 'error', message: 'Prepared workspaces require an upgraded runner', code: 'workspace_not_prepared', childStarted: false }
                 : filterError ? { type: 'error', message: filterError, childStarted: false } : await this.rpcGateway.spawnSession(
                 machineId,
                 directory,
@@ -2315,7 +2332,8 @@ export class SyncEngine {
                 undefined,
                 preallocated ? allocatedSessionId : undefined,
                 disabledMcpServers,
-                preparedWorkspace
+                preparedWorkspace,
+                preparedFiles
             )
         } catch (error) {
             // Ambiguous post-dispatch failure — keep the stub (child may exist).
@@ -3201,7 +3219,7 @@ export class SyncEngine {
         }
     }
 
-    async resumeSession(sessionId: string, namespace: string, opts?: { permissionMode?: PermissionMode; preparedWorkspace?: PreparedWorkspace }): Promise<ResumeSessionResult> {
+    async resumeSession(sessionId: string, namespace: string, opts?: { permissionMode?: PermissionMode; preparedWorkspace?: PreparedWorkspace; preparedFiles?: PreparedFiles | null }): Promise<ResumeSessionResult> {
         const access = this.sessionCache.resolveSessionAccess(sessionId, namespace)
         if (!access.ok) {
             return {
@@ -3282,6 +3300,7 @@ export class SyncEngine {
 
         const metadata = session.metadata!
         const preparedWorkspace = opts?.preparedWorkspace ?? metadata.preparedWorkspace
+        const preparedFiles = opts?.preparedFiles !== undefined ? opts.preparedFiles ?? undefined : metadata.preparedFiles
         if (metadata.preparedWorkspace && preparedWorkspace?.environmentId !== metadata.preparedWorkspace.environmentId) {
             return { type: 'error', code: 'workspace_not_prepared', message: 'Prepared workspace does not match the original session environment', childStarted: false }
         }
@@ -3289,12 +3308,15 @@ export class SyncEngine {
         const targetMachine = this.resolveOnlineMachineForSession(
             session,
             namespace,
-            { strictMachineId: !!preparedWorkspace || flavor === 'cursor' || (flavor === 'pi' && resumeToken !== undefined) }
+            { strictMachineId: !!preparedWorkspace || !!preparedFiles || flavor === 'cursor' || (flavor === 'pi' && resumeToken !== undefined) }
         )
         if (!targetMachine) {
             return { type: 'error', message: 'No machine online', code: 'no_machine_online' }
         }
 
+        if (preparedFiles && (preparedWorkspace || targetMachine.runnerState?.capabilities?.artifactTransfers !== 1)) {
+            return { type: 'error', code: 'files_not_prepared', message: 'Prepared files require an upgraded runner and shared workspace mode', childStarted: false }
+        }
         if (preparedWorkspace && targetMachine.runnerState?.capabilities?.managedWorkspaces !== 1) {
             return { type: 'error', code: 'workspace_not_prepared', message: 'Prepared workspaces require an upgraded runner', childStarted: false }
         }
@@ -3431,7 +3453,7 @@ export class SyncEngine {
                 session.collaborationMode ?? undefined,
                 session.copilotAgentMode ?? undefined,
                 resumedStartingMode,
-                undefined, undefined, metadata.disabledMcpServers, preparedWorkspace
+                undefined, undefined, metadata.disabledMcpServers, preparedWorkspace, preparedFiles
             )
 
             if (spawnResult.type !== 'success') {
@@ -3458,7 +3480,7 @@ export class SyncEngine {
                     })
                 }
                 return { type: 'error', message: spawnResult.message,
-                    code: spawnResult.code === 'native_session_missing' ? 'native_session_missing' : spawnResult.code === 'workspace_not_prepared' ? 'workspace_not_prepared' : 'resume_failed',
+                    code: spawnResult.code === 'native_session_missing' ? 'native_session_missing' : spawnResult.code === 'workspace_not_prepared' ? 'workspace_not_prepared' : spawnResult.code === 'files_not_prepared' ? 'files_not_prepared' : 'resume_failed',
                     ...(spawnResult.childStarted === false ? { childStarted: false } : {}) }
             }
 
@@ -3615,14 +3637,14 @@ export class SyncEngine {
                 }
             }
 
-            if (preparedWorkspace) {
+            if (preparedWorkspace || preparedFiles || opts?.preparedFiles === null) {
                 let saved = false
                 for (let attempt = 0; attempt < 3 && !saved; attempt++) {
                     const current = this.sessionCache.getSessionByNamespace(spawnResult.sessionId, namespace)
                         ?? this.sessionCache.refreshSession(spawnResult.sessionId)
                     if (!current?.metadata) break
                     const updated = this.store.sessions.updateSessionMetadata(current.id,
-                        { ...current.metadata, preparedWorkspace }, current.metadataVersion, namespace, { touchUpdatedAt: false })
+                        { ...current.metadata, preparedWorkspace, preparedFiles: preparedFiles ?? null }, current.metadataVersion, namespace, { touchUpdatedAt: false })
                     this.sessionCache.refreshSession(current.id)
                     saved = updated.result === 'success'
                     if (!saved && updated.result !== 'version-mismatch') break

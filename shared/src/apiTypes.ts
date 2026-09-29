@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { PreparedWorkspaceSchema } from './workspaces'
+import { PreparedFilesSchema } from './artifactTransfers'
 import {
     AttachmentMetadataSchema,
     CodexCollaborationModeSchema,
@@ -148,7 +149,7 @@ export type SpawnResponse =
     | {
         type: 'error'
         message: string
-        code?: 'agent_unavailable' | 'runner_upgrade_required' | 'outside_workspace_roots' | 'native_session_missing' | 'workspace_not_prepared'
+        code?: 'agent_unavailable' | 'runner_upgrade_required' | 'outside_workspace_roots' | 'native_session_missing' | 'workspace_not_prepared' | 'files_not_prepared'
         agent?: z.infer<typeof AgentFlavorSchema>
     }
 
@@ -160,6 +161,7 @@ export type SessionPermissionModeRequest = z.infer<typeof SessionPermissionModeR
 
 export const ResumeSessionRequestSchema = z.object({
     preparedWorkspace: PreparedWorkspaceSchema.optional(),
+    preparedFiles: PreparedFilesSchema.nullable().optional(),
     permissionMode: PermissionModeSchema.optional()
 })
 
@@ -644,6 +646,7 @@ export type QueuedStateResponse = {
 
 export const SpawnSessionRequestSchema = z.object({
     preparedWorkspace: PreparedWorkspaceSchema.optional(),
+    preparedFiles: PreparedFilesSchema.optional(),
     disabledMcpServers: DisabledMcpServersSchema.optional(),
     requestId: z.string().uuid().optional(),
     directory: z.string().min(1),

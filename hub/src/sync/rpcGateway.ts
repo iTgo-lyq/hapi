@@ -1,4 +1,4 @@
-import type { PreparedWorkspace, WorkspaceRequest, WorkspaceResponse } from '@hapi/protocol'
+import type { PreparedWorkspace, PreparedFiles, ArtifactTransferRequest, ArtifactTransferResponse, WorkspaceRequest, WorkspaceResponse } from '@hapi/protocol'
 import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, PermissionMode } from '@hapi/protocol/types'
 import { InterruptExecutionResponseSchema, type InterruptExecutionRequest, type InterruptExecutionResponse } from '@hapi/protocol'
 import { PERMISSION_REQUEST_NOT_FOUND_MESSAGE, RPC_METHODS } from '@hapi/protocol/rpcMethods'
@@ -245,13 +245,14 @@ export class RpcGateway {
         /** Fresh machine-spawn stub — distinct from reopen existingSessionId. */
         reservedSessionId?: string,
         disabledMcpServers?: string[],
-        preparedWorkspace?: PreparedWorkspace
+        preparedWorkspace?: PreparedWorkspace,
+        preparedFiles?: PreparedFiles
     ): Promise<
         | { type: 'success'; sessionId: string }
         | {
             type: 'error'
             message: string
-            code?: 'agent_unavailable' | 'outside_workspace_roots' | 'native_session_missing' | 'workspace_not_prepared'
+            code?: 'agent_unavailable' | 'outside_workspace_roots' | 'native_session_missing' | 'workspace_not_prepared' | 'files_not_prepared'
             agent?: AgentFlavor
             /** Explicit false = no OS child; stub safe to delete (#1911 B3). */
             childStarted?: boolean
@@ -278,6 +279,7 @@ export class RpcGateway {
                     reservedSessionId,
                     disabledMcpServers,
                     preparedWorkspace,
+                    preparedFiles,
                     // Local HTTP / tracking may still read sessionId; prefer
                     // reserved stub id, then reopen id.
                     sessionId: reservedSessionId ?? existingSessionId,
@@ -293,7 +295,7 @@ export class RpcGateway {
                     return { type: 'success', sessionId: obj.sessionId }
                 }
                 if (obj.type === 'error' && typeof obj.errorMessage === 'string') {
-                    const code = obj.code === 'agent_unavailable' || obj.code === 'outside_workspace_roots' || obj.code === 'native_session_missing' || obj.code === 'workspace_not_prepared'
+                    const code = obj.code === 'agent_unavailable' || obj.code === 'outside_workspace_roots' || obj.code === 'native_session_missing' || obj.code === 'workspace_not_prepared' || obj.code === 'files_not_prepared'
                         ? obj.code
                         : undefined
                     const unavailableAgent = typeof obj.agent === 'string' ? obj.agent as AgentFlavor : undefined
@@ -611,6 +613,10 @@ export class RpcGateway {
 
     async listPiModelsForMachine(machineId: string): Promise<RpcListPiModelsResponse> {
         return await this.machineRpc(machineId, RPC_METHODS.ListPiModelsForMachine, {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListPiModelsResponse
+    }
+
+    async artifactOperation(machineId: string, request: ArtifactTransferRequest): Promise<ArtifactTransferResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.ArtifactTransfer, request) as ArtifactTransferResponse
     }
 
     async workspaceOperation(machineId: string, request: WorkspaceRequest): Promise<WorkspaceResponse | { error: { code: string; message: string; hint?: string } }> {

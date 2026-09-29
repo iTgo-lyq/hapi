@@ -4,7 +4,7 @@ import { PERMISSION_REQUEST_NOT_FOUND_MESSAGE } from '@hapi/protocol/rpcMethods'
 import type { RpcRegistry } from '../socket/rpcRegistry'
 import { PermissionRequestNotFoundError, RpcGateway, RpcTargetMissingError } from './rpcGateway'
 
-function createGateway() {
+function createGateway(response?: unknown) {
     const timeouts: number[] = []
     const calls: Array<{ method: string; params: string }> = []
     const socket = {
@@ -13,6 +13,7 @@ function createGateway() {
             return {
                 async emitWithAck(_event: string, payload: { method: string; params: string }) {
                     calls.push(payload)
+                    if (response !== undefined) return JSON.stringify(response)
                     if (payload.method.endsWith(':cursor-chat-store-status')) {
                         return JSON.stringify({ onDisk: false, store: null })
                     }
@@ -207,5 +208,13 @@ describe('RpcGateway permission RPC error surfacing (tiann/hapi#1735)', () => {
     it('resolves normally when the CLI accepts the answer', async () => {
         const { gateway } = createGateway()
         await expect(gateway.approvePermission('session-1', 'request-1')).resolves.toBeUndefined()
+    })
+})
+
+
+it('preserves prepared-input rejection as a definite pre-child error across the RPC boundary', async () => {
+    const { gateway } = createGateway({ type: 'error', errorMessage: 'Inputs were released', code: 'files_not_prepared', childStarted: false })
+    expect(await gateway.spawnSession('machine', '/workspace', 'codex')).toEqual({
+        type: 'error', message: 'Inputs were released', code: 'files_not_prepared', childStarted: false,
     })
 })

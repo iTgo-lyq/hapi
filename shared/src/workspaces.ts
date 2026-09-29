@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { ArtifactNameSchema } from './artifacts'
 
 const id = z.string().uuid()
 const path = z.string().min(1).max(4096).refine(value => !value.includes('\0'), 'Invalid path')
@@ -11,12 +12,12 @@ export const WorkspaceSourceSchema = z.strictObject({
     baseRef: z.string().min(1), baseCommit: sha, objectFormat: z.enum(['sha1', 'sha256']), dirty: z.boolean(),
 })
 export type WorkspaceSource = z.infer<typeof WorkspaceSourceSchema>
-const input = z.strictObject({ name: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/), path,
+const input = z.strictObject({ name: ArtifactNameSchema, path,
     sha256: z.string().regex(/^[a-f0-9]{64}$/), size: z.number().int().nonnegative() })
 export const WorkspaceRequestSchema = z.discriminatedUnion('action', [
     z.strictObject({ action: z.literal('resolve'), cwd: path, baseRef: z.string().trim().min(1).default('HEAD') }),
     z.strictObject({ action: z.literal('prepare'), environmentId: id, preparationId: id, roundId: id,
-        source: WorkspaceSourceSchema, expectedHead: sha, inputs: z.array(input).max(100).default([]) }),
+        source: WorkspaceSourceSchema, expectedHead: sha, inputs: z.array(input).max(100).default([]).refine(files => new Set(files.map(file => file.name)).size === files.length, 'Duplicate input names') }),
     z.strictObject({ action: z.literal('inspect'), environmentId: id }),
     z.strictObject({ action: z.literal('finalize'), environmentId: id, preparationId: id, roundId: id, attemptId: id,
         sessionId: z.string().min(1).optional(), partial: z.boolean().default(false) }),

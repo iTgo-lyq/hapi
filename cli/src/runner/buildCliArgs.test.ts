@@ -591,3 +591,12 @@ it('carries selected MCP suppression without replacing native permissions', () =
     }
     expect(() => buildCliArgs('cursor', { directory: '/workspace', disabledMcpServers: ['runweft'] })).toThrow('only supported');
 });
+
+
+it('uses native Claude additional directories for only the prepared inputs without changing permissions', () => {
+    const options = { directory: '/workspace', inputDirectories: ['/data/input one', '/data/input two'] }
+    const args = buildCliArgs('claude', options)
+    expect(args.slice(0, 5)).toEqual(['claude', '--add-dir', '/data/input one', '--add-dir', '/data/input two'])
+    expect(args).not.toContain('--permission-mode'); expect(args).not.toContain('--yolo')
+    expect(buildCliArgs('codex', options)).not.toContain('--add-dir')
+})

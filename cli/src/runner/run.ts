@@ -35,13 +35,14 @@ import { isRetryableConnectionError } from '@/utils/errorUtils';
 
 import { cleanupRunnerState, getInstalledCliMtimeMs, isRunnerRunningCurrentlyInstalledHappyVersion, stopRunner, waitForRunnerHandoff } from './controlClient';
 import { startRunnerControlServer } from './controlServer';
+import { ArtifactTransferManager } from './artifacts/manager';
 import { WorkspaceManager } from './workspaces/manager';
 import { WorkspaceError } from './workspaces/git';
 import { MachinePathPolicy } from '@/api/machinePathPolicy';
 import { createWorktree, removeWorktree, type WorktreeInfo } from './worktree';
 import { validateWorkspaceDirectory } from './validateWorkspaceDirectory';
 import { checkNativeResume, NativeSessionMissingError } from './nativeResume';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { buildMachineMetadata } from '@/agent/sessionFactory';
 import { resolveWorkspaceRoots } from '@/utils/workspaceRoot';
 import { hashRunnerCliApiToken, hashRunnerExtraHeaders } from './runnerIdentity';
@@ -590,16 +591,20 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     // Spawn a new session (sessionId reserved for future --resume functionality)
     let spawnSession!: SpawnDeduplicator;
     const workspaceRoots = resolveWorkspaceRoots(options.workspaceRoots);
+    const assertStopped = async (id: string) => {
+      if (hasVerifiedExit(id)) return;
+      const runtimes = (await readRuntimes({ strict: true })).filter(runtime =>
+        runtime.hub === configuration.apiUrl && runtime.authHash === runtimeAuthHash());
+      if (runtimes.some(runtime => runtime.sessions[id]?.active)) throw new WorkspaceError('workspace_execution_active', 'An execution is still active.');
+      if (runtimes.some(runtime => runtime.sessions[id]?.active === false) || hasVerifiedExit(id)) return;
+      throw new WorkspaceError('workspace_execution_unknown', 'Runner has no verified stop evidence for this session.');
+    };
     const workspaces = new WorkspaceManager({
-      home: configuration.happyHomeDir, machineId, pathPolicy: new MachinePathPolicy({ workspaceRoots }),
-      assertStopped: async (id) => {
-        if (hasVerifiedExit(id)) return;
-        const runtimes = (await readRuntimes({ strict: true })).filter(runtime =>
-          runtime.hub === configuration.apiUrl && runtime.authHash === runtimeAuthHash());
-        if (runtimes.some(runtime => runtime.sessions[id]?.active)) throw new WorkspaceError('workspace_execution_active', 'A workspace execution is still active.');
-        if (runtimes.some(runtime => runtime.sessions[id]?.active === false) || hasVerifiedExit(id)) return;
-        throw new WorkspaceError('workspace_execution_unknown', 'Runner has no verified stop evidence for this workspace session.');
-      }
+      home: configuration.happyHomeDir, machineId, pathPolicy: new MachinePathPolicy({ workspaceRoots }), assertStopped,
+    });
+    const artifacts = new ArtifactTransferManager({
+      home: configuration.happyHomeDir, url: configuration.apiUrl, token: configuration.cliApiToken, extraHeaders: configuration.extraHeaders,
+      pathPolicy: new MachinePathPolicy({ workspaceRoots }), assertStopped,
     });
 
     const spawnSessionOnce = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
@@ -839,7 +844,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
 
         if (options.validatePreparedWorkspace) {
           try { await options.validatePreparedWorkspace(); }
-          catch (error) { return { type: 'error', errorMessage: error instanceof Error ? error.message : String(error), code: 'workspace_not_prepared', childStarted: false }; }
+          catch (error) { return { type: 'error', errorMessage: error instanceof Error ? error.message : String(error), code: options.preparedFiles ? 'files_not_prepared' : 'workspace_not_prepared', childStarted: false }; }
         }
         happyProcess = spawnHappyCLI(args, {
           cwd: spawnDirectory,
@@ -1111,19 +1116,35 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     spawnSession = createSpawnDeduplicator(async (options) => {
       let dispatched = false;
       try {
-        if (!options.preparedWorkspace) {
+        if (!options.preparedWorkspace && !options.preparedFiles) {
           if (await workspaces.contains(options.directory)) return { type: 'error', errorMessage: 'Managed checkout requires a current preparation receipt.', code: 'workspace_not_prepared', childStarted: false };
           return await spawnSessionOnce(options);
         }
-        if (options.sessionType === 'worktree') throw new WorkspaceError('workspace_not_prepared', 'Prepared workspaces cannot create a second worktree.');
+        if (options.preparedWorkspace && options.preparedFiles) throw new Error('Use one preparation gate for this workspace.');
+        if (options.sessionType === 'worktree') throw new Error('Prepared inputs require the final execution directory.');
         const id = options.reservedSessionId ?? options.existingSessionId ?? options.sessionId;
-        if (!id) throw new WorkspaceError('workspace_not_prepared', 'Prepared launch requires an allocated HAPI session identity.');
-        return await workspaces.launch(options.preparedWorkspace, options.directory, id, () => { dispatched = true; return spawnSessionOnce({
-          ...options, approvedNewDirectoryCreation: false,
-          validatePreparedWorkspace: async () => { await workspaces.validatePrepared(options.preparedWorkspace!, options.directory); },
-        }); });
+        if (!id) throw new Error('Prepared launch requires an allocated HAPI session identity.');
+        if (options.preparedFiles) {
+          if (await workspaces.contains(options.directory)) throw new Error('Managed checkout requires preparedWorkspace.');
+          return await artifacts.launch(options.preparedFiles, id, async () => {
+            const files = await artifacts.validatePrepared(options.preparedFiles!);
+            dispatched = true;
+            return spawnSessionOnce({ ...options, approvedNewDirectoryCreation: false,
+              inputDirectories: [...new Set(files.map(file => dirname(file.path)))],
+              validatePreparedWorkspace: async () => { await artifacts.validatePrepared(options.preparedFiles!); },
+            });
+          });
+        }
+        return await workspaces.launch(options.preparedWorkspace!, options.directory, id, async () => {
+          const { preparation } = await workspaces.validatePrepared(options.preparedWorkspace!, options.directory);
+          dispatched = true;
+          return spawnSessionOnce({ ...options, approvedNewDirectoryCreation: false,
+            inputDirectories: [...new Set(preparation.inputs.map(file => dirname(file.path)))],
+            validatePreparedWorkspace: async () => { await workspaces.validatePrepared(options.preparedWorkspace!, options.directory); },
+          });
+        });
       } catch (error) {
-        return { type: 'error', errorMessage: error instanceof Error ? error.message : String(error), ...(dispatched ? {} : { code: 'workspace_not_prepared' as const, childStarted: false }) };
+        return { type: 'error', errorMessage: error instanceof Error ? error.message : String(error), ...(dispatched ? {} : { code: options.preparedFiles ? 'files_not_prepared' as const : 'workspace_not_prepared' as const, childStarted: false }) };
       }
     });
     for (const [pid, record] of persistedResumeProcesses) {
@@ -1697,6 +1718,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     // Set RPC handlers
     apiMachine.setRPCHandlers({
       workspaces,
+      artifacts,
       spawnSession,
       stopSession,
       requestShutdown: () => requestShutdown('hapi-app')
@@ -1983,6 +2005,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
 
       apiMachine.shutdown();
       await workspaces.stop();
+      await artifacts.stop();
       await stopControlServer();
       await cleanupRunnerState();
       await releaseRunnerLock(runnerLockHandle);
@@ -2030,6 +2053,7 @@ export function buildCliArgs(
                   ? 'agy'
                   : 'claude';
   const args = [agentCommand];
+  if (agent === 'claude') for (const directory of options.inputDirectories ?? []) args.push('--add-dir', directory);
   if (options.disabledMcpServers?.length) {
     if (agent !== 'codex' && agent !== 'claude') throw new Error('MCP tool filtering is only supported for Codex and Claude');
     for (const name of options.disabledMcpServers) args.push('--hapi-disable-mcp-server', name);

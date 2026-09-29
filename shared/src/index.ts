@@ -30,3 +30,5 @@ export * from './version'
 export type * from './types'
 export * from './workspaces'
 export * from './artifacts'
+
+export * from './artifactTransfers'

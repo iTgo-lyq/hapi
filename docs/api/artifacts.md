@@ -82,3 +82,21 @@ quota exhaustion, request conflicts, checksum/size mismatch, active operations,
 retention references, deleted objects, and missing published bytes. Query the
 same request/object after uncertain transport; do not create a replacement
 object or rerun a model task to recover a file response.
+
+
+## Machine input preparation
+
+`POST /api/machines/:id/artifacts` uses the existing client JWT, namespace check and machine RPC. The Runner advertises `artifactTransfers: 1`. No native session is required.
+
+- `materialize`: `{action, operationId, files:[{artifactId,name,size,sha256}]}` accepts a durable request, then downloads from the configured Hub using its existing CLI token and additional request headers. Names are unique single filenames, including Unicode and spaces, at most 240 UTF-8 bytes. Receipts and inputs live under `HAPI_HOME/artifact-transfers/<operationId>/`.
+- `inspect`: `{action, operationId}` returns `{operation}` with the original request, status (`accepted/running/succeeded/failed/unknown`), verified local `files`, error and retention (`retained/releasing/released`). A disconnected caller queries this receipt; interrupted work is not inferred successful.
+- Repeating the same `materialize` returns the existing operation, or explicitly retries a failed/unknown download using the same frozen inputs. Changed arguments conflict. Released inputs cannot be restored with the same operation ID.
+- `release`: `{action, operationId}` removes only this operation's local input directory, retaining its receipt. It refuses running transfers or executions without verified stop evidence. It does not delete Hub objects.
+
+Downloads stream with a 60-second idle timeout and no total deadline. Runner stop cancels an active transfer and persists its failure. Files become ready only after length/hash verification and durable rename.
+
+Shared-directory spawn and resume can supply `preparedFiles: {operationId}`. The Runner rechecks ready state and file hashes before spawning, records the associated session, and rejects missing/changed/released inputs with `files_not_prepared` and `childStarted: false`. A worktree instead passes these downloaded paths to existing `prepare.inputs` and uses only `preparedWorkspace`. Combining both gates is rejected. The current input directories are passed through Claude's existing `--add-dir` option; runtime defaults and other native configuration remain in place.
+
+A resumed session keeps its previous `preparedFiles` when omitted, accepts a new reference for the next input set, or accepts explicit `null` to clear the binding. Definite input rejection preserves the archived state and original binding. Native bootstrap and sparse metadata updates retain the Hub-owned preparation reference. Machine files do not change the behavior of sessions without a preparation gate.
+
+Output capture and delivery are not implemented by this API yet.

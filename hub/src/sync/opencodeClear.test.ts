@@ -645,7 +645,8 @@ describe('SyncEngine.clearOpenCodeSession', () => {
                 // forkSession / reservedSessionId — clear uses reopen existingSessionId
                 undefined,
                 undefined,
-                // disabledMcpServers / preparedWorkspace — unset for this OpenCode replacement
+                // disabledMcpServers / preparedWorkspace / preparedFiles — unset for this OpenCode replacement
+                undefined,
                 undefined,
                 undefined
             )

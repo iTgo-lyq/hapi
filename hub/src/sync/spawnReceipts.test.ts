@@ -22,7 +22,7 @@ function setup(path = ':memory:') {
     cleanup.push(() => { engine.stop(); store.close() })
     for (const [id, namespace] of [['machine', 'default'], ['other', 'default'], ['foreign', 'tenant']]) {
         engine.getOrCreateMachine(id!, { host: 'local', platform: 'linux', happyCliVersion: '0.30.7',
-            capabilities: [MACHINE_CAPABILITIES.AgentAvailability] }, { status: 'running', capabilities: { mcpToolFilter: true, managedWorkspaces: 1 } }, namespace!)
+            capabilities: [MACHINE_CAPABILITIES.AgentAvailability] }, { status: 'running', capabilities: { mcpToolFilter: true, managedWorkspaces: 1, artifactTransfers: 1 } }, namespace!)
         engine.handleMachineAlive({ machineId: id!, time: Date.now() })
     }
     const gateway = (engine as unknown as { rpcGateway: RpcGateway }).rpcGateway
@@ -267,4 +267,55 @@ it('keeps Hub-owned preparation through native bootstrap adoption and sparse met
         return { type: 'success', sessionId: adopted.id }
     }
     expect((await engine.spawnSessionWithReceipt('default', 'machine', { ...request(), preparedWorkspace })).response?.type).toBe('success')
+})
+
+
+it('binds prepared files to the request, preserves adoption metadata and forwards resume or explicit clear', async () => {
+    const { engine, gateway, store } = setup()
+    const preparedFiles = { operationId: crypto.randomUUID() }, input = { ...request(), preparedFiles }
+    gateway.spawnSession = async (...args) => {
+        expect(args[20]).toEqual(preparedFiles)
+        const session = store.sessions.adoptPreallocatedSession(args[17]!, 'files-native', { path: '/workspace', host: 'local', flavor: 'codex' }, null, 'default')
+        expect(session.metadata).toMatchObject({ preparedFiles })
+        store.sessions.updateSessionMetadata(session.id, { lifecycleState: 'archived', archivedAt: 100, codexSessionId: crypto.randomUUID() }, session.metadataVersion, 'default')
+        expect(store.sessions.getSession(session.id)?.metadata).toMatchObject({ preparedFiles })
+        return { type: 'success', sessionId: session.id }
+    }
+    const receipt = await engine.spawnSessionWithReceipt('default', 'machine', input)
+    await expect(engine.spawnSessionWithReceipt('default', 'machine', { ...input, preparedFiles: { operationId: crypto.randomUUID() } })).rejects.toBeInstanceOf(SpawnRequestConflictError)
+    const next = { operationId: crypto.randomUUID() }, forwarded: unknown[] = []
+    gateway.spawnSession = async (...args) => { forwarded.push(args[20]); return { type: 'error', message: 'Inputs are missing', code: 'files_not_prepared', childStarted: false } }
+    expect(await engine.resumeSession(receipt.sessionId, 'default', { preparedFiles: next })).toMatchObject({ code: 'files_not_prepared', childStarted: false })
+    expect(forwarded).toEqual([next]); expect(store.sessions.getSession(receipt.sessionId)?.metadata).toMatchObject({ preparedFiles })
+    gateway.spawnSession = async (...args) => { expect(args[20]).toBeUndefined(); return { type: 'success', sessionId: receipt.sessionId } }
+    ;(engine as unknown as { waitForSessionActive: () => Promise<boolean> }).waitForSessionActive = async () => true
+    expect(await engine.resumeSession(receipt.sessionId, 'default', { preparedFiles: null })).toMatchObject({ type: 'success' })
+    expect((store.sessions.getSession(receipt.sessionId)?.metadata as { preparedFiles?: unknown }).preparedFiles).toBeUndefined()
+})
+
+it('rejects file gates on old runners or mixed workspace gates before dispatch', async () => {
+    const { engine, gateway, store } = setup()
+    engine.getOrCreateMachine('old', { host: 'host', platform: 'linux', happyCliVersion: 'old' }, null, 'default')
+    gateway.spawnSession = async () => { throw new Error('must not dispatch') }
+    for (const machineId of ['machine', 'old']) {
+        const receipt = await engine.spawnSessionWithReceipt('default', machineId, { ...request(), preparedFiles: { operationId: crypto.randomUUID() },
+            ...(machineId === 'machine' ? { preparedWorkspace: { environmentId: crypto.randomUUID(), preparationId: crypto.randomUUID() } } : {}) })
+        expect(receipt.response).toMatchObject({ type: 'error', code: 'files_not_prepared', childStarted: false })
+        expect(store.sessions.getSession(receipt.sessionId)).toBeNull()
+    }
+})
+
+it('routes machine file operations within namespace and rejects release while an associated execution is active', async () => {
+    const { engine, gateway } = setup(), calls: unknown[] = [], operationId = crypto.randomUUID()
+    gateway.artifactOperation = async (machine, request) => { calls.push([machine, request]); return { error: { code: 'fixture', message: 'Recorded dispatch' } } }
+    const app = new Hono<WebAppEnv>(); app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() }); app.route('/api', createMachinesRoutes(() => engine))
+    const post = (machine: string, body: unknown) => app.request(`/api/machines/${machine}/artifacts`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    expect((await post('foreign', { action: 'inspect', operationId })).status).toBe(403)
+    expect((await post('machine', { action: 'inspect', operationId: '../escape' })).status).toBe(400)
+    expect(calls).toHaveLength(0)
+    expect((await post('machine', { action: 'inspect', operationId })).status).toBe(409)
+    expect(calls).toEqual([['machine', { action: 'inspect', operationId }]])
+    engine.getOrCreateSession('files-active', { path: '/workspace', host: 'local', machineId: 'machine', flavor: 'codex', preparedFiles: { operationId } }, null, 'default')
+    expect(await (await post('machine', { action: 'release', operationId })).json()).toMatchObject({ code: 'artifact_execution_active' })
+    expect(calls).toHaveLength(1)
 })

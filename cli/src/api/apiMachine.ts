@@ -23,6 +23,7 @@ import {
 } from '@hapi/protocol/apiTypes'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import { RUNNER_CAPABILITIES } from '@hapi/protocol'
+import { transferProblem, type ArtifactTransferManager } from '@/runner/artifacts/manager'
 import type { WorkspaceManager } from '@/runner/workspaces/manager'
 import { workspaceProblem } from '@/runner/workspaces/git'
 import type { RunnerState, Machine, MachineMetadata } from './types'
@@ -73,6 +74,7 @@ export { normalizeWindowsDriveRoot } from './machinePathPolicy'
 
 type MachineRpcHandlers = {
     workspaces?: WorkspaceManager
+    artifacts?: ArtifactTransferManager
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>
     stopSession: (
         sessionId: string,
@@ -407,7 +409,13 @@ export class ApiMachineClient {
         return this.pathPolicy.isWithinSpawnRoots(resolvedCwd)
     }
 
-    setRPCHandlers({ spawnSession, stopSession, requestShutdown, workspaces }: MachineRpcHandlers): void {
+    setRPCHandlers({ spawnSession, stopSession, requestShutdown, workspaces, artifacts }: MachineRpcHandlers): void {
+        this.rpcHandlerManager.registerHandler(RPC_METHODS.ArtifactTransfer, async (request: unknown) => {
+            try {
+                if (!artifacts) throw new Error('Machine file transfers are unavailable')
+                return await artifacts.request(request)
+            } catch (error) { return { error: transferProblem(error) } }
+        })
         this.rpcHandlerManager.registerHandler(RPC_METHODS.ManagedWorkspace, async (request: unknown) => {
             try {
                 if (!workspaces) throw new Error('Managed workspace provider is unavailable')
@@ -415,7 +423,7 @@ export class ApiMachineClient {
             } catch (error) { return { error: workspaceProblem(error) } }
         })
         this.rpcHandlerManager.registerHandler(RPC_METHODS.SpawnHappySession, async (params: any) => {
-            const { directory, sessionId, existingSessionId, reservedSessionId, resumeSessionId, machineId, approvedNewDirectoryCreation, agent, model, effort, modelReasoningEffort, yolo, permissionMode, serviceTier, collaborationMode, copilotAgentMode, token, sessionType, worktreeName, startingMode, forkSession, disabledMcpServers, preparedWorkspace } = params || {}
+            const { directory, sessionId, existingSessionId, reservedSessionId, resumeSessionId, machineId, approvedNewDirectoryCreation, agent, model, effort, modelReasoningEffort, yolo, permissionMode, serviceTier, collaborationMode, copilotAgentMode, token, sessionType, worktreeName, startingMode, forkSession, disabledMcpServers, preparedWorkspace, preparedFiles } = params || {}
 
             if (!directory) {
                 throw new Error('Directory is required')
@@ -456,6 +464,7 @@ export class ApiMachineClient {
                 forkSession: forkSession === true,
                 disabledMcpServers,
                 preparedWorkspace,
+                preparedFiles,
                 validateDirectory: async (path) => await this.pathPolicy.allowsSpawn(path),
             })
 

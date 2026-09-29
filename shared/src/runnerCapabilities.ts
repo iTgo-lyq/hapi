@@ -18,6 +18,7 @@ export const RUNNER_CAPABILITIES = {
     codexSharedRuntime: true as const,
     mcpToolFilter: true as const,
     managedWorkspaces: 1 as const,
+    artifactTransfers: 1 as const,
     agentAvailabilityDetails: true as const,
     piExistingSessionResume: true as const,
     agentConfigs: getBuiltinAgentConfigDescriptors()

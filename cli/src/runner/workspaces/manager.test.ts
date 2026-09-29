@@ -268,7 +268,7 @@ describe('workspace recovery and data retention', () => {
 
 it('keeps verified inputs outside source and detects changes before native launch', async () => {
     const f = fixture(), inputPath = join(f.root, 'context.txt'); writeFileSync(inputPath, 'context')
-    const input = { name: 'context.txt', path: inputPath, size: 7, sha256: createHash('sha256').update('context').digest('hex') }
+    const input = { name: '设计 说明.txt', path: inputPath, size: 7, sha256: createHash('sha256').update('context').digest('hex') }
     const { request, workspace } = await prepare(f, { inputs: [input] })
     const copied = workspace.preparations[request.preparationId]!.inputs[0]!
     expect(copied.path.startsWith(workspace.checkout)).toBe(false)

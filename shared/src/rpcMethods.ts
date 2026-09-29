@@ -11,6 +11,7 @@ export const RPC_METHODS = {
     StopRunner: 'stop-runner',
     ListMachineDirectory: 'list-directory',
     PathExists: 'path-exists',
+    ManagedWorkspace: 'managed-workspace',
     AgentAvailability: 'agent-availability',
     CursorChatStoreStatus: 'cursor-chat-store-status',
     GitStatus: 'git-status',

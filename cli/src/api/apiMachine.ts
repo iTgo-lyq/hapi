@@ -23,6 +23,8 @@ import {
 } from '@hapi/protocol/apiTypes'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import { RUNNER_CAPABILITIES } from '@hapi/protocol'
+import type { WorkspaceManager } from '@/runner/workspaces/manager'
+import { workspaceProblem } from '@/runner/workspaces/git'
 import type { RunnerState, Machine, MachineMetadata } from './types'
 import { RunnerStateSchema, MachineMetadataSchema } from './types'
 import { getInstalledCliMtimeMs } from '@/runner/controlClient'
@@ -70,6 +72,7 @@ import { getAgentAvailabilityResponse, getAgentAvailabilityDetailsResponse } fro
 export { normalizeWindowsDriveRoot } from './machinePathPolicy'
 
 type MachineRpcHandlers = {
+    workspaces?: WorkspaceManager
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>
     stopSession: (
         sessionId: string,
@@ -404,9 +407,15 @@ export class ApiMachineClient {
         return this.pathPolicy.isWithinSpawnRoots(resolvedCwd)
     }
 
-    setRPCHandlers({ spawnSession, stopSession, requestShutdown }: MachineRpcHandlers): void {
+    setRPCHandlers({ spawnSession, stopSession, requestShutdown, workspaces }: MachineRpcHandlers): void {
+        this.rpcHandlerManager.registerHandler(RPC_METHODS.ManagedWorkspace, async (request: unknown) => {
+            try {
+                if (!workspaces) throw new Error('Managed workspace provider is unavailable')
+                return await workspaces.request(request)
+            } catch (error) { return { error: workspaceProblem(error) } }
+        })
         this.rpcHandlerManager.registerHandler(RPC_METHODS.SpawnHappySession, async (params: any) => {
-            const { directory, sessionId, existingSessionId, reservedSessionId, resumeSessionId, machineId, approvedNewDirectoryCreation, agent, model, effort, modelReasoningEffort, yolo, permissionMode, serviceTier, collaborationMode, copilotAgentMode, token, sessionType, worktreeName, startingMode, forkSession, disabledMcpServers } = params || {}
+            const { directory, sessionId, existingSessionId, reservedSessionId, resumeSessionId, machineId, approvedNewDirectoryCreation, agent, model, effort, modelReasoningEffort, yolo, permissionMode, serviceTier, collaborationMode, copilotAgentMode, token, sessionType, worktreeName, startingMode, forkSession, disabledMcpServers, preparedWorkspace } = params || {}
 
             if (!directory) {
                 throw new Error('Directory is required')
@@ -446,6 +455,7 @@ export class ApiMachineClient {
                 startingMode,
                 forkSession: forkSession === true,
                 disabledMcpServers,
+                preparedWorkspace,
                 validateDirectory: async (path) => await this.pathPolicy.allowsSpawn(path),
             })
 

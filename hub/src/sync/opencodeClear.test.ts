@@ -645,7 +645,8 @@ describe('SyncEngine.clearOpenCodeSession', () => {
                 // forkSession / reservedSessionId — clear uses reopen existingSessionId
                 undefined,
                 undefined,
-                // disabledMcpServers — unsupported and unset for OpenCode
+                // disabledMcpServers / preparedWorkspace — unset for this OpenCode replacement
+                undefined,
                 undefined
             )
             expect(engine.getSessionByNamespace(replacementSessionId, 'default')?.metadata).toMatchObject({

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { PreparedWorkspaceSchema } from './workspaces'
 import { COPILOT_AGENT_MODES, type CopilotAgentMode } from './copilotModes'
 import { CODEX_COLLABORATION_MODES, PERMISSION_MODES } from './modes'
 import { AgentConfigDescriptorSchema } from './agentConfig'
@@ -57,6 +58,7 @@ export const McpServerNameSchema = z.string().regex(/^[A-Za-z0-9_-]+$/).max(128)
 export const DisabledMcpServersSchema = z.array(McpServerNameSchema).max(64)
 
 export const MetadataSchema = z.object({
+    preparedWorkspace: PreparedWorkspaceSchema.optional(),
     /** Native per-session tool suppression, reapplied when this session resumes. */
     disabledMcpServers: DisabledMcpServersSchema.optional(),
     path: z.string(),
@@ -500,6 +502,7 @@ export const RunnerStateSchema = z.object({
     capabilities: z.object({
         codexSharedRuntime: z.literal(true).optional(),
         mcpToolFilter: z.literal(true).optional(),
+        managedWorkspaces: z.literal(1).optional(),
         agentAvailabilityDetails: z.literal(true).optional(),
         piExistingSessionResume: z.literal(true).optional(),
         agentConfigs: z.array(AgentConfigDescriptorSchema).optional()

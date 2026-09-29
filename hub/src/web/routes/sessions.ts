@@ -223,7 +223,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({ error: 'Invalid body' }, 400)
         }
 
-        const { permissionMode } = parsed.data
+        const { permissionMode, preparedWorkspace } = parsed.data
         if (permissionMode !== undefined) {
             const flavor = sessionResult.session.metadata?.flavor ?? 'claude'
             if (!isPermissionModeAllowedForFlavor(permissionMode, flavor)) {
@@ -235,15 +235,15 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         const result = await engine.resumeSession(
             sessionResult.sessionId,
             namespace,
-            permissionMode !== undefined ? { permissionMode } : undefined
+            permissionMode !== undefined || preparedWorkspace ? { permissionMode, preparedWorkspace } : undefined
         )
         if (result.type === 'error') {
             const status = result.code === 'no_machine_online' ? 503
                 : result.code === 'access_denied' ? 403
                     : result.code === 'session_not_found' ? 404
-                        : result.code === 'resume_unavailable' || result.code === 'native_session_missing' ? 409
+                        : result.code === 'resume_unavailable' || result.code === 'native_session_missing' || result.code === 'workspace_not_prepared' ? 409
                             : 500
-            return c.json({ error: result.message, code: result.code }, status)
+            return c.json({ error: result.message, code: result.code, childStarted: result.childStarted }, status)
         }
 
         return c.json({ type: 'success', sessionId: result.sessionId })

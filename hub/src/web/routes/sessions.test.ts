@@ -1208,7 +1208,7 @@ describe('sessions routes', () => {
         })
 
         expect(response.status).toBe(200)
-        expect(capturedResumeOpts).toEqual({ permissionMode: 'bypassPermissions' })
+        expect(capturedResumeOpts).toMatchObject({ permissionMode: 'bypassPermissions' })
     })
 
     it('returns 409 when resume token is unavailable', async () => {
@@ -1773,3 +1773,18 @@ describe('targeted execution interrupt', () => {
         expect(calls).toEqual([{ sessionId: 'session-1', target: { inputLocalId: 'old-input', executionId: 'old' } }]);
     });
 });
+
+
+it('forwards prepared resume and returns an explicit no-child workspace rejection', async () => {
+    const session = createSession({ active: false, metadata: { path: '/workspace', host: 'local', flavor: 'codex' } })
+    const preparedWorkspace = { environmentId: crypto.randomUUID(), preparationId: crypto.randomUUID() }
+    const { app } = createApp(session, { resumeSession: async (_id, _namespace, options) => {
+        expect(options).toMatchObject({ preparedWorkspace })
+        return { type: 'error', code: 'workspace_not_prepared', message: 'Preparation expired', childStarted: false }
+    } })
+    const response = await app.request('/api/sessions/session-1/resume', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ preparedWorkspace })
+    })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toEqual({ error: 'Preparation expired', code: 'workspace_not_prepared', childStarted: false })
+})

@@ -1,7 +1,10 @@
-import type { AgentFlavor } from '@hapi/protocol'
+import type { AgentFlavor, PreparedWorkspace } from '@hapi/protocol'
 import type { CopilotAgentMode } from '@hapi/protocol'
 
 export interface SpawnSessionOptions {
+    preparedWorkspace?: PreparedWorkspace
+    /** Internal final validation after the ordinary directory checks. */
+    validatePreparedWorkspace?: () => Promise<void>
     disabledMcpServers?: string[]
     machineId?: string
     directory: string
@@ -38,7 +41,7 @@ export type SpawnSessionResult =
     | {
         type: 'error'
         errorMessage: string
-        code?: 'agent_unavailable' | 'outside_workspace_roots' | 'native_session_missing'
+        code?: 'agent_unavailable' | 'outside_workspace_roots' | 'native_session_missing' | 'workspace_not_prepared'
         agent?: AgentFlavor
         /**
          * Explicit false = runner rejected before exec (no OS child). Hub may

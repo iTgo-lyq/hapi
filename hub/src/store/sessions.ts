@@ -130,6 +130,7 @@ export function mergeSessionMetadata(prior: unknown, next: unknown): unknown {
     merged = carryForwardIfMissing(prior, next, merged, PARSE_IDENTITY_FIELDS)
     merged = carryForwardIfMissing(prior, next, merged, ROUTING_FIELDS)
     merged = carryForwardIfMissing(prior, next, merged, SIMPLE_RESUME_TOKENS)
+    merged = carryForwardIfMissing(prior, next, merged, ['preparedWorkspace'])
     merged = preserveCursorProtocolPair(prior, next, merged)
     return merged ?? next
 }
@@ -364,7 +365,9 @@ export function adoptPreallocatedSession(
         }
 
         const now = Date.now()
-        const metadataJson = JSON.stringify(metadata)
+        const preparedWorkspace = isPlainObject(existing.metadata) ? existing.metadata.preparedWorkspace : undefined
+        const metadataJson = JSON.stringify(preparedWorkspace && isPlainObject(metadata)
+            ? { ...metadata, preparedWorkspace } : metadata)
         const agentStateJson = agentState === null || agentState === undefined ? null : JSON.stringify(agentState)
         const stubTag = machineSpawnPreallocTag(id)
 

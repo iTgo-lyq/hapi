@@ -22,7 +22,8 @@ function setup(path = ':memory:') {
     cleanup.push(() => { engine.stop(); store.close() })
     for (const [id, namespace] of [['machine', 'default'], ['other', 'default'], ['foreign', 'tenant']]) {
         engine.getOrCreateMachine(id!, { host: 'local', platform: 'linux', happyCliVersion: '0.30.7',
-            capabilities: [MACHINE_CAPABILITIES.AgentAvailability] }, { status: 'running', capabilities: { mcpToolFilter: true } }, namespace!)
+            capabilities: [MACHINE_CAPABILITIES.AgentAvailability] }, { status: 'running', capabilities: { mcpToolFilter: true, managedWorkspaces: 1 } }, namespace!)
+        engine.handleMachineAlive({ machineId: id!, time: Date.now() })
     }
     const gateway = (engine as unknown as { rpcGateway: RpcGateway }).rpcGateway
     return { store, engine, gateway }
@@ -170,3 +171,100 @@ it('rejects unsupported runners and runtimes without spawning or retaining a liv
         expect(store.sessions.getSession(receipt.sessionId)).toBeNull();
     }
 });
+
+
+it('preserves prepared workspace metadata and includes it in durable spawn identity', async () => {
+    const { engine, gateway, store } = setup()
+    const preparedWorkspace = { environmentId: crypto.randomUUID(), preparationId: crypto.randomUUID() }
+    gateway.spawnSession = async (...args) => {
+        expect(args[19]).toEqual(preparedWorkspace)
+        expect(store.sessions.getSession(args[17]!)?.metadata).toMatchObject({ preparedWorkspace })
+        return { type: 'success', sessionId: args[17]! }
+    }
+    const input = { ...request(), preparedWorkspace }
+    expect((await engine.spawnSessionWithReceipt('default', 'machine', input)).response?.type).toBe('success')
+    await expect(engine.spawnSessionWithReceipt('default', 'machine', { ...input,
+        preparedWorkspace: { ...preparedWorkspace, preparationId: crypto.randomUUID() } })).rejects.toBeInstanceOf(SpawnRequestConflictError)
+})
+
+it('keeps workspace operations within the machine namespace and passes the structured request', async () => {
+    const { engine, gateway } = setup(), calls: unknown[] = []
+    const input = { action: 'inspect' as const, environmentId: crypto.randomUUID() }
+    gateway.workspaceOperation = async (machine, operation) => { calls.push([machine, operation]); return { error: { code: 'workspace_not_found', message: 'Not found' } } }
+    const app = new Hono<WebAppEnv>()
+    app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
+    app.route('/api', createMachinesRoutes(() => engine))
+    const post = (machine: string, body: unknown) => app.request(`/api/machines/${machine}/workspaces`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+    })
+    expect((await post('foreign', input)).status).toBe(403)
+    expect((await post('machine', { ...input, environmentId: '../escape' })).status).toBe(400)
+    expect(calls).toHaveLength(0)
+    const response = await post('machine', input)
+    expect(response.status).toBe(409); expect(await response.json()).toMatchObject({ code: 'workspace_not_found' })
+    expect(calls).toEqual([['machine', input]])
+})
+
+it('rejects an unsupported prepared launch before creating a native child', async () => {
+    const { engine, gateway, store } = setup()
+    engine.getOrCreateMachine('old', { host: 'host', platform: 'linux', happyCliVersion: 'old' }, null, 'default')
+    gateway.spawnSession = async () => { throw new Error('must not dispatch') }
+    const receipt = await engine.spawnSessionWithReceipt('default', 'old', { ...request(),
+        preparedWorkspace: { environmentId: crypto.randomUUID(), preparationId: crypto.randomUUID() } })
+    expect(receipt.response).toMatchObject({ type: 'error', code: 'workspace_not_prepared', childStarted: false })
+    expect(store.sessions.getSession(receipt.sessionId)).toBeNull()
+})
+
+it('forwards the new preparation on resume and preserves archived state on rejection', async () => {
+    const { engine, gateway, store } = setup()
+    const preparedWorkspace = { environmentId: crypto.randomUUID(), preparationId: crypto.randomUUID() }
+    const session = engine.getOrCreateSession('workspace-resume', {
+        path: '/workspace', host: 'local', machineId: 'machine', flavor: 'codex', codexSessionId: crypto.randomUUID(),
+        lifecycleState: 'archived', archivedAt: 100, preparedWorkspace,
+    }, null, 'default')
+    const next = { ...preparedWorkspace, preparationId: crypto.randomUUID() }
+    const calls: unknown[] = []
+    gateway.spawnSession = async (...args) => {
+        calls.push(args[19])
+        return { type: 'error', message: 'Prepared workspace is stale', code: 'workspace_not_prepared', childStarted: false }
+    }
+    expect(await engine.resumeSession(session.id, 'default', { preparedWorkspace: next })).toMatchObject({ type: 'error', code: 'workspace_not_prepared', childStarted: false })
+    expect(calls).toEqual([next])
+    expect(store.sessions.getSession(session.id)?.metadata).toMatchObject({ lifecycleState: 'archived', preparedWorkspace })
+    calls.length = 0
+    expect(await engine.resumeSession(session.id, 'default', { preparedWorkspace: { ...next, environmentId: crypto.randomUUID() } })).toMatchObject({ type: 'error', code: 'workspace_not_prepared', childStarted: false })
+    expect(calls).toHaveLength(0)
+})
+
+
+it('persists the successful resume preparation and blocks managed clear from bypassing the round', async () => {
+    const { engine, gateway, store } = setup()
+    const preparedWorkspace = { environmentId: crypto.randomUUID(), preparationId: crypto.randomUUID() }
+    const session = engine.getOrCreateSession('workspace-resume-ok', {
+        path: '/workspace', host: 'local', machineId: 'machine', flavor: 'codex', codexSessionId: crypto.randomUUID(),
+        lifecycleState: 'archived', archivedAt: 100, preparedWorkspace, capabilities: { concurrentClients: true },
+    }, null, 'default')
+    const next = { ...preparedWorkspace, preparationId: crypto.randomUUID() }
+    gateway.spawnSession = async () => ({ type: 'success', sessionId: session.id })
+    ;(engine as unknown as { waitForSessionActive: () => Promise<boolean> }).waitForSessionActive = async () => true
+    expect(await engine.resumeSession(session.id, 'default', { preparedWorkspace: next })).toEqual({ type: 'success', sessionId: session.id })
+    expect(store.sessions.getSession(session.id)?.metadata).toMatchObject({ preparedWorkspace: next })
+    gateway.clearConversation = async () => { throw new Error('must not dispatch clear') }
+    await expect(engine.clearConversation(session.id, 'default')).rejects.toThrow('Managed workspace rounds')
+})
+
+
+it('keeps Hub-owned preparation through native bootstrap adoption and sparse metadata updates', async () => {
+    const { engine, gateway, store } = setup()
+    const preparedWorkspace = { environmentId: crypto.randomUUID(), preparationId: crypto.randomUUID() }
+    gateway.spawnSession = async (...args) => {
+        const adopted = store.sessions.adoptPreallocatedSession(args[17]!, 'native-workspace-tag',
+            { host: 'local', path: '/workspace', flavor: 'codex' }, null, 'default')
+        expect(adopted.metadata).toMatchObject({ preparedWorkspace })
+        const updated = store.sessions.updateSessionMetadata(adopted.id, { lifecycleState: 'archived' }, adopted.metadataVersion, 'default')
+        expect(updated.result).toBe('success')
+        expect(store.sessions.getSession(adopted.id)?.metadata).toMatchObject({ preparedWorkspace })
+        return { type: 'success', sessionId: adopted.id }
+    }
+    expect((await engine.spawnSessionWithReceipt('default', 'machine', { ...request(), preparedWorkspace })).response?.type).toBe('success')
+})

@@ -7,6 +7,7 @@
  * - No E2E encryption; data is stored as JSON in SQLite
  */
 
+import type { PreparedWorkspace, WorkspaceRequest } from '@hapi/protocol'
 import { isKnownFlavor, isLiveLifecycleState, isSteeringSupportedForSession, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
 import {
     cliBinaryUpdatedOnDisk,
@@ -103,11 +104,11 @@ export type {
 
 export type ResumeSessionResult =
     | { type: 'success'; sessionId: string }
-    | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'no_machine_online' | 'resume_unavailable' | 'resume_failed' | 'native_session_missing'; rollbackSafe?: boolean }
+    | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'no_machine_online' | 'resume_unavailable' | 'resume_failed' | 'native_session_missing' | 'workspace_not_prepared'; childStarted?: boolean; rollbackSafe?: boolean }
 
 export type ReopenSessionResult =
     | { type: 'success'; sessionId: string; resumed: boolean; cursorSessionProtocol?: 'acp' | 'stream-json' }
-    | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'no_machine_online' | 'resume_unavailable' | 'resume_failed' | 'native_session_missing' | 'metadata_conflict' }
+    | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'no_machine_online' | 'resume_unavailable' | 'resume_failed' | 'native_session_missing' | 'metadata_conflict' | 'workspace_not_prepared' }
     | { type: 'incomplete'; message: string; missing: [string, ...string[]] }
 
 export type LocalResumeTargetResult =
@@ -2071,6 +2072,9 @@ export class SyncEngine {
         if (!access.ok || !access.session.active || !access.session.metadata?.capabilities?.concurrentClients) {
             throw new Error('Clear requires an active shared session')
         }
+        if (access.session.metadata.preparedWorkspace) {
+            throw new Error('Managed workspace rounds must be stopped and sealed before starting another conversation through their coordinator')
+        }
         const result = await this.rpcGateway.clearConversation(access.sessionId)
         const child = await this.validateSharedChild(access.session, result.sessionId)
         if (!child) throw new Error('Invalid shared-runtime clear binding')
@@ -2168,6 +2172,24 @@ export class SyncEngine {
         this.sessionCache.applySessionConfig(sessionId, applied)
     }
 
+    async workspaceOperation(machineId: string, namespace: string, request: WorkspaceRequest) {
+        const machine = this.getMachineByNamespace(machineId, namespace)
+        if (!machine) return { error: { code: 'machine_not_found', message: 'Machine not found in namespace' } }
+        if (!machine.active) return { error: { code: 'machine_offline', message: 'Machine is offline' } }
+        if (machine.runnerState?.capabilities?.managedWorkspaces !== 1) return { error: { code: 'runner_upgrade_required', message: 'Upgrade the Runner to use managed workspaces' } }
+        if (request.action === 'finalize' || request.action === 'remove') {
+            const current = await this.rpcGateway.workspaceOperation(machineId, { action: 'inspect', environmentId: request.environmentId })
+            if ('error' in current) return current
+            if (!('workspace' in current)) return { error: { code: 'workspace_response_invalid', message: 'Runner did not return a workspace' } }
+            const root = current.workspace.checkout
+            const writers = this.getSessionsByNamespace(namespace).filter(session => session.metadata?.machineId === machineId
+                && (session.metadata.path === root || session.metadata.path.startsWith(root + '/') || session.metadata.path.startsWith(root + '\\'))
+                && (session.active || session.metadata.lifecycleState !== 'archived'))
+            if (writers.length) return { error: { code: 'workspace_execution_active', message: 'Archive all executions in this checkout before modifying its lifecycle' } }
+        }
+        return this.rpcGateway.workspaceOperation(machineId, request)
+    }
+
     getSpawnReceipt(namespace: string, machineId: string, requestId: string): SpawnReceipt | null {
         const receipt = this.store.spawnReceipts.get(namespace, requestId)
         return receipt?.machineId === machineId ? receipt : null
@@ -2190,7 +2212,7 @@ export class SyncEngine {
             return this.store.sessions.getOrCreateSession(`machine-spawn:${sessionId}`, {
                 path: request.directory, host: machine.metadata?.host ?? 'unknown',
                 flavor: request.agent ?? 'claude', machineId, startedBy: 'runner', startedFromRunner: true,
-                disabledMcpServers: request.disabledMcpServers
+                disabledMcpServers: request.disabledMcpServers, preparedWorkspace: request.preparedWorkspace
             }, null, namespace, request.model, request.effort, request.modelReasoningEffort, sessionId).id
         })
         if (!reservation.created) return reservation.receipt
@@ -2200,7 +2222,7 @@ export class SyncEngine {
             request.model, request.modelReasoningEffort, request.yolo, request.sessionType,
             request.worktreeName, undefined, request.effort, request.permissionMode,
             request.serviceTier, undefined, request.collaborationMode, request.copilotAgentMode,
-            request.startingMode, namespace, sessionId, request.disabledMcpServers)
+            request.startingMode, namespace, sessionId, request.disabledMcpServers, request.preparedWorkspace)
         this.store.spawnReceipts.finish(namespace, input.requestId, response)
         return { ...reservation.receipt, response }
     }
@@ -2226,7 +2248,8 @@ export class SyncEngine {
         // argv before the first webhook (#1911 Major: unreapable window).
         namespace?: string,
         reservedSessionId?: string,
-        disabledMcpServers?: string[]
+        disabledMcpServers?: string[],
+        preparedWorkspace?: PreparedWorkspace
     ): ReturnType<RpcGateway['spawnSession']> {
         // Fresh machine spawns historically omitted existingSessionId, so
         // buildCliArgs could not stamp --hapi-session-id / --existing-session-id.
@@ -2249,6 +2272,7 @@ export class SyncEngine {
                     startedBy: 'runner',
                     startedFromRunner: true,
                     disabledMcpServers,
+                    preparedWorkspace,
                 },
                 null,
                 namespace,
@@ -2263,11 +2287,13 @@ export class SyncEngine {
         let result: Awaited<ReturnType<RpcGateway['spawnSession']>>
         try {
             const machine = namespace ? this.getMachineByNamespace(machineId, namespace) : this.getMachine(machineId)
+            const workspaceError = preparedWorkspace && machine?.runnerState?.capabilities?.managedWorkspaces !== 1
             const filterError = disabledMcpServers?.length
                 ? !['codex', 'claude'].includes(agent) ? 'MCP tool filtering is only supported for Codex and Claude'
                     : machine?.runnerState?.capabilities?.mcpToolFilter !== true ? 'MCP tool filtering requires an upgraded runner' : null
                 : null
-            result = filterError ? { type: 'error', message: filterError, childStarted: false } : await this.rpcGateway.spawnSession(
+            result = workspaceError ? { type: 'error', message: 'Prepared workspaces require an upgraded runner', code: 'workspace_not_prepared', childStarted: false }
+                : filterError ? { type: 'error', message: filterError, childStarted: false } : await this.rpcGateway.spawnSession(
                 machineId,
                 directory,
                 agent,
@@ -2288,7 +2314,8 @@ export class SyncEngine {
                 startingMode,
                 undefined,
                 preallocated ? allocatedSessionId : undefined,
-                disabledMcpServers
+                disabledMcpServers,
+                preparedWorkspace
             )
         } catch (error) {
             // Ambiguous post-dispatch failure — keep the stub (child may exist).
@@ -3174,7 +3201,7 @@ export class SyncEngine {
         }
     }
 
-    async resumeSession(sessionId: string, namespace: string, opts?: { permissionMode?: PermissionMode }): Promise<ResumeSessionResult> {
+    async resumeSession(sessionId: string, namespace: string, opts?: { permissionMode?: PermissionMode; preparedWorkspace?: PreparedWorkspace }): Promise<ResumeSessionResult> {
         const access = this.sessionCache.resolveSessionAccess(sessionId, namespace)
         if (!access.ok) {
             return {
@@ -3254,16 +3281,23 @@ export class SyncEngine {
         }
 
         const metadata = session.metadata!
+        const preparedWorkspace = opts?.preparedWorkspace ?? metadata.preparedWorkspace
+        if (metadata.preparedWorkspace && preparedWorkspace?.environmentId !== metadata.preparedWorkspace.environmentId) {
+            return { type: 'error', code: 'workspace_not_prepared', message: 'Prepared workspace does not match the original session environment', childStarted: false }
+        }
 
         const targetMachine = this.resolveOnlineMachineForSession(
             session,
             namespace,
-            { strictMachineId: flavor === 'cursor' || (flavor === 'pi' && resumeToken !== undefined) }
+            { strictMachineId: !!preparedWorkspace || flavor === 'cursor' || (flavor === 'pi' && resumeToken !== undefined) }
         )
         if (!targetMachine) {
             return { type: 'error', message: 'No machine online', code: 'no_machine_online' }
         }
 
+        if (preparedWorkspace && targetMachine.runnerState?.capabilities?.managedWorkspaces !== 1) {
+            return { type: 'error', code: 'workspace_not_prepared', message: 'Prepared workspaces require an upgraded runner', childStarted: false }
+        }
         if (metadata.disabledMcpServers?.length && targetMachine.runnerState?.capabilities?.mcpToolFilter !== true) {
             return { type: 'error', message: 'MCP tool filtering requires an upgraded runner', code: 'resume_failed' }
         }
@@ -3396,7 +3430,8 @@ export class SyncEngine {
                 access.sessionId,
                 session.collaborationMode ?? undefined,
                 session.copilotAgentMode ?? undefined,
-                resumedStartingMode
+                resumedStartingMode,
+                undefined, undefined, metadata.disabledMcpServers, preparedWorkspace
             )
 
             if (spawnResult.type !== 'success') {
@@ -3423,7 +3458,8 @@ export class SyncEngine {
                     })
                 }
                 return { type: 'error', message: spawnResult.message,
-                    code: spawnResult.code === 'native_session_missing' ? 'native_session_missing' : 'resume_failed' }
+                    code: spawnResult.code === 'native_session_missing' ? 'native_session_missing' : spawnResult.code === 'workspace_not_prepared' ? 'workspace_not_prepared' : 'resume_failed',
+                    ...(spawnResult.childStarted === false ? { childStarted: false } : {}) }
             }
 
             if (requiresPiNativeReady && spawnResult.sessionId !== access.sessionId) {
@@ -3579,6 +3615,20 @@ export class SyncEngine {
                 }
             }
 
+            if (preparedWorkspace) {
+                let saved = false
+                for (let attempt = 0; attempt < 3 && !saved; attempt++) {
+                    const current = this.sessionCache.getSessionByNamespace(spawnResult.sessionId, namespace)
+                        ?? this.sessionCache.refreshSession(spawnResult.sessionId)
+                    if (!current?.metadata) break
+                    const updated = this.store.sessions.updateSessionMetadata(current.id,
+                        { ...current.metadata, preparedWorkspace }, current.metadataVersion, namespace, { touchUpdatedAt: false })
+                    this.sessionCache.refreshSession(current.id)
+                    saved = updated.result === 'success'
+                    if (!saved && updated.result !== 'version-mismatch') break
+                }
+                if (!saved) return { type: 'error', code: 'resume_failed', message: 'Execution resumed but its workspace association could not be persisted' }
+            }
             this.sessionCache.markSessionActive(spawnResult.sessionId)
             piResumeSucceeded = true
             if (requiresPiNativeReady) await this.writePiResumeAttempt(access.sessionId, namespace, null)

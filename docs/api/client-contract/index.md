@@ -13,6 +13,7 @@ does not imply that both apps expose a corresponding UI.
 | Page | Contents |
 |------|----------|
 | [Auth](./auth.md) | Pairing deeplink, access-token grammar, JWT exchange, silent re-auth, namespaces, credential storage |
+| [Managed workspaces](../managed-workspaces.md) | Machine Git preparation, retained results and prepared spawn/resume |
 | [REST](./rest.md) | Interactive client APIs, other hub surfaces, request/response shapes, gzip negotiation |
 | [SSE](./sse.md) | `GET /api/events` stream: subscription modes, resume handshake, event ids, reconnect policy |
 | [Pagination](./pagination.md) | Message window: composite cursors, epoch reset, optimistic-send reconciliation |

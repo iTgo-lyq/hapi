@@ -1519,6 +1519,11 @@ export class SessionCache {
             changed = true
         }
 
+        if (oldObj.preparedWorkspace) {
+            merged.preparedWorkspace = oldObj.preparedWorkspace
+            changed = true
+        }
+
         if (oldObj.worktree && !newObj.worktree) {
             merged.worktree = oldObj.worktree
             changed = true

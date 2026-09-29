@@ -489,3 +489,22 @@ describe('cli session handlers', () => {
         })
     })
 })
+
+
+it('preserves the Hub preparation when a native client omits or replaces it', () => {
+    const store = new Store(':memory:')
+    const preparedWorkspace = { environmentId: crypto.randomUUID(), preparationId: crypto.randomUUID() }
+    const session = store.sessions.getOrCreateSession('prepared-workspace', { host: 'local', path: '/workspace', preparedWorkspace }, null, 'default')
+    const socket = new FakeSocket()
+    registerSessionHandlers(socket as unknown as CliSocketWithData, {
+        store, resolveSessionAccess: () => ({ ok: true, value: store.sessions.getSession(session.id)! }), emitAccessError() {},
+    })
+    for (const value of [undefined, null, { environmentId: crypto.randomUUID(), preparationId: crypto.randomUUID() }]) {
+        const current = store.sessions.getSession(session.id)!
+        socket.trigger('update-metadata', { sid: session.id, expectedVersion: current.metadataVersion, metadata: { host: 'local', path: '/workspace', preparedWorkspace: value } }, result => {
+            expect(result).toMatchObject({ result: 'success', metadata: { preparedWorkspace } })
+        })
+        expect(store.sessions.getSession(session.id)?.metadata).toMatchObject({ preparedWorkspace })
+    }
+    store.close()
+})

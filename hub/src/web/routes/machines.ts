@@ -7,6 +7,7 @@ import {
     SpawnSessionRequestSchema
 } from '@hapi/protocol'
 import { Hono } from 'hono'
+import { WorkspaceRequestSchema } from '@hapi/protocol'
 import { RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol/rpcMethods'
 import type { SyncEngine } from '../../sync/syncEngine'
 import { RpcTargetMissingError } from '../../sync/rpcGateway'
@@ -16,6 +17,19 @@ import { SpawnRequestConflictError } from '../../store/spawnReceiptStore'
 
 export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
+
+    app.post('/machines/:id/workspaces', async (c) => {
+        const engine = getSyncEngine()
+        if (!engine) return c.json({ error: 'Not connected' }, 503)
+        const machineId = c.req.param('id')
+        const machine = requireMachine(c, engine, machineId)
+        if (machine instanceof Response) return machine
+        const parsed = WorkspaceRequestSchema.safeParse(await c.req.json().catch(() => null))
+        if (!parsed.success) return c.json({ error: 'Invalid workspace request' }, 400)
+        const result = await engine.workspaceOperation(machineId, c.get('namespace'), parsed.data)
+        if ('error' in result) return c.json({ error: result.error.message, code: result.error.code, hint: result.error.hint }, 409)
+        return c.json(result)
+    })
 
     app.get('/machines', (c) => {
         const engine = getSyncEngine()
@@ -132,7 +146,8 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             startingMode,
             namespace,
             undefined,
-            parsed.data.disabledMcpServers
+            parsed.data.disabledMcpServers,
+            parsed.data.preparedWorkspace
         )
         return c.json(result)
     })

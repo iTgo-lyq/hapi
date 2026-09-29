@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { PreparedWorkspaceSchema } from './workspaces'
 import {
     AttachmentMetadataSchema,
     CodexCollaborationModeSchema,
@@ -147,7 +148,7 @@ export type SpawnResponse =
     | {
         type: 'error'
         message: string
-        code?: 'agent_unavailable' | 'runner_upgrade_required' | 'outside_workspace_roots' | 'native_session_missing'
+        code?: 'agent_unavailable' | 'runner_upgrade_required' | 'outside_workspace_roots' | 'native_session_missing' | 'workspace_not_prepared'
         agent?: z.infer<typeof AgentFlavorSchema>
     }
 
@@ -158,6 +159,7 @@ export const SessionPermissionModeRequestSchema = z.object({
 export type SessionPermissionModeRequest = z.infer<typeof SessionPermissionModeRequestSchema>
 
 export const ResumeSessionRequestSchema = z.object({
+    preparedWorkspace: PreparedWorkspaceSchema.optional(),
     permissionMode: PermissionModeSchema.optional()
 })
 
@@ -641,6 +643,7 @@ export type QueuedStateResponse = {
 }
 
 export const SpawnSessionRequestSchema = z.object({
+    preparedWorkspace: PreparedWorkspaceSchema.optional(),
     disabledMcpServers: DisabledMcpServersSchema.optional(),
     requestId: z.string().uuid().optional(),
     directory: z.string().min(1),

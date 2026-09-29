@@ -9,6 +9,7 @@ import { spawnWithTerminalGuard } from "@/utils/spawnWithTerminalGuard";
 import { getHapiBlobsDir } from "@/constants/uploadPaths";
 import { stripNewlinesForWindowsShellArg } from "@/utils/shellEscape";
 import { getDefaultClaudeCodePath } from "./sdk/utils";
+import { disabledClaudeMcpTools } from '@/agent/mcpFilter';
 import type { SessionModel } from "@/api/types";
 
 function withoutTrackedModelArgs(args: string[]): string[] {
@@ -38,6 +39,7 @@ export async function claudeLocal(opts: {
     path: string,
     claudeEnvVars?: Record<string, string>,
     claudeArgs?: string[]
+    disabledMcpServers?: string[]
     model?: SessionModel
     allowedTools?: string[]
     hookSettingsPath: string
@@ -92,6 +94,10 @@ export async function claudeLocal(opts: {
     }
     if (opts.model) {
         args.push('--model', opts.model);
+    }
+
+    if (opts.disabledMcpServers?.length) {
+        args.push('--disallowedTools', disabledClaudeMcpTools(opts.disabledMcpServers).join(','));
     }
 
     // Add hook settings for session tracking

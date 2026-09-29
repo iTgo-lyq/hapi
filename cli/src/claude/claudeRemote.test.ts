@@ -512,3 +512,18 @@ describe('claudeRemote /compact result reporting', () => {
         expect(wireOrder).toEqual(['result', 'Compaction completed', 'ready']);
     }, 15_000);
 });
+
+it('merges persistent MCP suppression after the first message mode is selected', async () => {
+    const querySpy = vi.spyOn(claudeSdk, 'query').mockImplementation(queryMock as typeof claudeSdk.query);
+    queryMock.mockReturnValueOnce(createAsyncStream([{ type: 'result', subtype: 'success' } as unknown as SDKMessage]));
+    const { claudeRemote } = await import('./claudeRemote');
+    let calls = 0;
+    try {
+        await claudeRemote({ sessionId: null, path: process.cwd(), allowedTools: ['mcp__keep__report'],
+            disabledMcpServers: ['runweft'], hookSettingsPath: '/tmp/hook.json',
+            canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+            nextMessage: async () => calls++ === 0 ? { message: 'probe', mode: { permissionMode: 'default', disallowedTools: ['Bash(rm:*)'] } } : null,
+            onReady() {}, isAborted: () => false, onSessionFound() {}, onMessage() {} });
+        expect(queryMock.mock.calls[0][0].options).toMatchObject({ disallowedTools: ['Bash(rm:*)', 'mcp__runweft__*'], allowedTools: ['mcp__keep__report'] });
+    } finally { queryMock.mockReset(); querySpy.mockRestore(); }
+});

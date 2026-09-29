@@ -4,6 +4,7 @@
  */
 
 import { query } from './query'
+import { disabledClaudeMcpTools } from '@/agent/mcpFilter'
 import type { SDKSystemMessage } from './types'
 import { logger } from '@/ui/logger'
 import type { SkillSummary } from '@/modules/common/skills'
@@ -79,6 +80,7 @@ export function classifyClaudeSlashCatalog(
 export async function extractSDKMetadata(options: {
     cwd?: string
     claudeArgs?: readonly string[]
+    disabledMcpServers?: readonly string[]
 } = {}): Promise<SDKMetadata> {
     const abortController = new AbortController()
     const timeout = setTimeout(() => abortController.abort(), 10_000)
@@ -93,6 +95,7 @@ export async function extractSDKMetadata(options: {
                 cwd: options.cwd,
                 additionalArgs: filterCatalogAffectingClaudeArgs(options.claudeArgs),
                 allowedTools: ['Bash(echo)'],
+                disallowedTools: disabledClaudeMcpTools(options.disabledMcpServers),
                 maxTurns: 1,
                 abort: abortController.signal
             }

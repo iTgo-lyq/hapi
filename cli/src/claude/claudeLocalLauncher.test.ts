@@ -52,6 +52,7 @@ function createSessionStub() {
             hookSettingsPath: null,
             queue: { size: () => 0, reset: () => {}, setOnMessage: () => {} },
             client: {
+                getMetadata: () => metadata,
                 sendClaudeSessionMessage: (msg: Record<string, unknown>) => { sentMessages.push(msg) },
                 updateMetadata: (handler: (current: Metadata) => Metadata) => {
                     metadata = handler(metadata)
@@ -205,3 +206,10 @@ describe('claudeLocalLauncher message filtering', () => {
         expect(sentMessages).toHaveLength(0)
     })
 })
+
+it('reapplies the saved MCP filter when launching local Claude', async () => {
+    const { session, setMetadata } = createSessionStub();
+    setMetadata({ path: '/tmp/test', host: 'localhost', disabledMcpServers: ['runweft'] });
+    await claudeLocalLauncher(session as never);
+    expect(harness.launches.at(-1)).toMatchObject({ disabledMcpServers: ['runweft'] });
+});

@@ -13,6 +13,7 @@ import { getHapiBlobsDir } from "@/constants/uploadPaths";
 import { getDefaultClaudeCodePath } from "./sdk/utils";
 import { filterCatalogAffectingClaudeArgs } from "./sdk/metadataExtractor";
 import { nativeInputIds } from './execution';
+import { disabledClaudeMcpTools } from '@/agent/mcpFilter';
 
 export async function claudeRemote(opts: {
 
@@ -22,6 +23,7 @@ export async function claudeRemote(opts: {
     mcpServers?: Record<string, any>,
     claudeEnvVars?: Record<string, string>,
     claudeArgs?: string[],
+    disabledMcpServers?: string[],
     allowedTools: string[],
     hookSettingsPath: string,
     signal?: AbortSignal,
@@ -209,6 +211,10 @@ export async function claudeRemote(opts: {
             ? first.mode.allowedTools.concat(opts.allowedTools)
             : opts.allowedTools;
         sdkOptions.disallowedTools = first.mode.disallowedTools;
+    }
+
+    if (opts.disabledMcpServers?.length) {
+        sdkOptions.disallowedTools = [...(sdkOptions.disallowedTools ?? []), ...disabledClaudeMcpTools(opts.disabledMcpServers)];
     }
 
     // Track thinking state

@@ -129,7 +129,9 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             parsed.data.collaborationMode,
             parsed.data.copilotAgentMode,
             startingMode,
-            namespace
+            namespace,
+            undefined,
+            parsed.data.disabledMcpServers
         )
         return c.json(result)
     })

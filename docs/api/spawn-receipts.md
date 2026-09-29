@@ -41,3 +41,22 @@ credentials or raw spawn parameters, and are not a retry queue. Schema 27 adds
 `spawn_receipts` to the existing Hub database. Back up the stopped Hub before
 upgrading; reverting to an older binary requires restoring its database backup,
 because older binaries reject newer schema versions.
+
+## Per-session MCP tools
+
+`capabilities.mcpToolFilter: 1` on `/health` allows an optional
+`disabledMcpServers: ["server-name"]` in the spawn body. Names use ASCII letters,
+digits, underscores or hyphens, with at most 128 characters each and 64 entries.
+The list participates in request-ID conflict checks. A nonempty list requires
+Codex or Claude and `runnerState.capabilities.mcpToolFilter: true`; otherwise
+spawn returns an error with `childStarted: false` before dispatch.
+
+The list is saved in session metadata and applied before native tool discovery.
+Codex disables those servers per thread, without altering unrelated threads in
+the shared runtime. Claude excludes their tools with native `disallowedTools`;
+the MCP process may still connect. Other MCP servers and native subagent tools
+are unchanged. An absent or empty list preserves existing behavior.
+
+Resume reads the saved list and checks the target Runner capability before
+reactivating the session. It does not accept a second override. This option
+controls model-visible MCP tools, not process isolation or shell access.

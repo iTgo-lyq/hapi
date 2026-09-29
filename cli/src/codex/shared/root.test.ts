@@ -55,10 +55,10 @@ afterEach(async () => {
     finally { vi.useRealTimers(); }
 });
 
-async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end'] }) {
+async function fixture(opts?: { disabledMcpServers?: string[]; hubArchived?: boolean; end?: RootHost['end'] }) {
     const directory = await mkdtemp('/tmp/hapi-shared-root-');
     let state: AgentState = { steeringActive: true };
-    let metadata: Metadata = { path: directory, host: 'test', flavor: 'codex' };
+    let metadata: Metadata = { path: directory, host: 'test', flavor: 'codex', disabledMcpServers: opts?.disabledMcpServers };
     let reconnect: (() => void) | null = null;
     const updateState = vi.fn((fn: (value: AgentState) => AgentState) => { state = fn(state); });
     const rpc = new Map<string, (raw: unknown) => Promise<unknown>>();
@@ -80,7 +80,7 @@ async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end'] }) 
         sendSessionDeath() {}, async flush() {}, close() {}
     } as unknown as ApiSessionClient;
     const end = opts?.end ?? (async () => { throw new Error('Unexpected root archive'); });
-    const root = new SharedCodexRoot({ session, workingDirectory: directory } as SessionBootstrapResult, {
+    const root = new SharedCodexRoot({ session, metadata, workingDirectory: directory } as SessionBootstrapResult, {
         directory, generation: 'test', endpoint: 'mock', settingsFor: () => undefined,
         create: async () => { throw new Error('Unexpected root creation'); },
         end
@@ -347,4 +347,16 @@ describe('shared steering availability', () => {
         await f.root.activate();
         await vi.waitFor(() => expect(end).toHaveBeenCalledTimes(1));
     });
+});
+
+it('disables only this root server and overrides an incoming re-enable', async () => {
+    const child = await fixture({ disabledMcpServers: ['runweft'] });
+    const sibling = await fixture();
+    const keep = { command: 'keep' };
+    const params = { config: { 'mcp_servers.keep': keep, 'mcp_servers.runweft': { enabled: true, url: 'http://unused' } } };
+    const childConfig = child.root.config(params).config as Record<string, unknown>;
+    expect(childConfig['mcp_servers.runweft']).toEqual({ command: 'hapi-disabled-mcp-placeholder', enabled: false });
+    expect(childConfig['mcp_servers.keep']).toEqual(keep);
+    expect((sibling.root.config(params).config as Record<string, unknown>)['mcp_servers.runweft']).toEqual(params.config['mcp_servers.runweft']);
+    expect(params.config['mcp_servers.runweft'].enabled).toBe(true);
 });

@@ -20,6 +20,7 @@ vi.mock('./claudeRemote', () => ({
     claudeRemote: async (opts: any) => {
         const { parseSpecialCommand } = await import('@/parsers/specialCommands')
 
+        expect(opts.disabledMcpServers).toEqual(['runweft'])
         harness.callCount += 1
         harness.claudeArgsPerCall.push(opts.claudeArgs ? [...opts.claudeArgs] : opts.claudeArgs)
 
@@ -98,6 +99,7 @@ function createClientStub() {
             }
         },
         rpcHandlers,
+        getMetadata: () => ({ disabledMcpServers: ['runweft'] }),
         keepAlive: () => {},
         updateMetadata: (mutator: (metadata: any) => any) => { mutator({}) },
         emitMessagesConsumed: () => {},

@@ -2189,7 +2189,8 @@ export class SyncEngine {
             const sessionId = randomUUID()
             return this.store.sessions.getOrCreateSession(`machine-spawn:${sessionId}`, {
                 path: request.directory, host: machine.metadata?.host ?? 'unknown',
-                flavor: request.agent ?? 'claude', machineId, startedBy: 'runner', startedFromRunner: true
+                flavor: request.agent ?? 'claude', machineId, startedBy: 'runner', startedFromRunner: true,
+                disabledMcpServers: request.disabledMcpServers
             }, null, namespace, request.model, request.effort, request.modelReasoningEffort, sessionId).id
         })
         if (!reservation.created) return reservation.receipt
@@ -2199,7 +2200,7 @@ export class SyncEngine {
             request.model, request.modelReasoningEffort, request.yolo, request.sessionType,
             request.worktreeName, undefined, request.effort, request.permissionMode,
             request.serviceTier, undefined, request.collaborationMode, request.copilotAgentMode,
-            request.startingMode, namespace, sessionId)
+            request.startingMode, namespace, sessionId, request.disabledMcpServers)
         this.store.spawnReceipts.finish(namespace, input.requestId, response)
         return { ...reservation.receipt, response }
     }
@@ -2224,7 +2225,8 @@ export class SyncEngine {
         // Required for fresh machine spawns so the runner stamps the HAPI id on
         // argv before the first webhook (#1911 Major: unreapable window).
         namespace?: string,
-        reservedSessionId?: string
+        reservedSessionId?: string,
+        disabledMcpServers?: string[]
     ): ReturnType<RpcGateway['spawnSession']> {
         // Fresh machine spawns historically omitted existingSessionId, so
         // buildCliArgs could not stamp --hapi-session-id / --existing-session-id.
@@ -2246,6 +2248,7 @@ export class SyncEngine {
                     machineId,
                     startedBy: 'runner',
                     startedFromRunner: true,
+                    disabledMcpServers,
                 },
                 null,
                 namespace,
@@ -2259,7 +2262,12 @@ export class SyncEngine {
 
         let result: Awaited<ReturnType<RpcGateway['spawnSession']>>
         try {
-            result = await this.rpcGateway.spawnSession(
+            const machine = namespace ? this.getMachineByNamespace(machineId, namespace) : this.getMachine(machineId)
+            const filterError = disabledMcpServers?.length
+                ? !['codex', 'claude'].includes(agent) ? 'MCP tool filtering is only supported for Codex and Claude'
+                    : machine?.runnerState?.capabilities?.mcpToolFilter !== true ? 'MCP tool filtering requires an upgraded runner' : null
+                : null
+            result = filterError ? { type: 'error', message: filterError, childStarted: false } : await this.rpcGateway.spawnSession(
                 machineId,
                 directory,
                 agent,
@@ -2279,7 +2287,8 @@ export class SyncEngine {
                 copilotAgentMode,
                 startingMode,
                 undefined,
-                preallocated ? allocatedSessionId : undefined
+                preallocated ? allocatedSessionId : undefined,
+                disabledMcpServers
             )
         } catch (error) {
             // Ambiguous post-dispatch failure — keep the stub (child may exist).
@@ -3253,6 +3262,10 @@ export class SyncEngine {
         )
         if (!targetMachine) {
             return { type: 'error', message: 'No machine online', code: 'no_machine_online' }
+        }
+
+        if (metadata.disabledMcpServers?.length && targetMachine.runnerState?.capabilities?.mcpToolFilter !== true) {
+            return { type: 'error', message: 'MCP tool filtering requires an upgraded runner', code: 'resume_failed' }
         }
 
         if (flavor === 'pi' && resumeToken && targetMachine.runnerState?.capabilities?.piExistingSessionResume !== true) {

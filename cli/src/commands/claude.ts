@@ -1,3 +1,4 @@
+import { McpServerNameSchema } from '@hapi/protocol/schemas'
 import chalk from 'chalk'
 import { z } from 'zod'
 import { PROTOCOL_VERSION } from '@hapi/protocol'
@@ -74,6 +75,8 @@ export const claudeCommand: CommandDefinition = {
                     throw new Error('Missing --hapi-session-id value')
                 }
                 options.reservedSessionId = sessionId
+            } else if (arg === '--hapi-disable-mcp-server') {
+                (options.disabledMcpServers ??= []).push(McpServerNameSchema.parse(args[++i]))
             } else if (arg === '--existing-session-id') {
                 const sessionId = args[++i]
                 if (!sessionId) {

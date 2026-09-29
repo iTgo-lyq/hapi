@@ -582,3 +582,12 @@ describe('releaseRecoveredSpawnDedupe', () => {
         expect(recovered.has(123)).toBe(false)
     })
 })
+
+it('carries selected MCP suppression without replacing native permissions', () => {
+    for (const agent of ['codex', 'claude']) {
+        const args = buildCliArgs(agent, { directory: '/workspace', disabledMcpServers: ['runweft', 'other'] });
+        expect(args.slice(0, 5)).toEqual([agent, '--hapi-disable-mcp-server', 'runweft', '--hapi-disable-mcp-server', 'other']);
+        expect(args).not.toContain('--yolo');
+    }
+    expect(() => buildCliArgs('cursor', { directory: '/workspace', disabledMcpServers: ['runweft'] })).toThrow('only supported');
+});

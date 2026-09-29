@@ -479,6 +479,7 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                         onThinkingChange: session.onThinkingChange,
                         claudeEnvVars: session.claudeEnvVars,
                         claudeArgs: session.claudeArgs,
+                        disabledMcpServers: session.client.getMetadata()?.disabledMcpServers,
                         onMessage,
                         onFirstResult: (initialMessage) => {
                             applySessionTitleFallback(session.client, initialMessage);

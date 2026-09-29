@@ -197,6 +197,7 @@ describe('bootstrapExistingSession', () => {
 
         session.metadata = {
             ...existingMetadata,
+            disabledMcpServers: ['runweft'],
             claudeSessionId: 'claude-thread-1',
             codexSessionId: 'codex-thread-1',
             geminiSessionId: 'gemini-thread-1',
@@ -243,6 +244,7 @@ describe('bootstrapExistingSession', () => {
         })
 
         expect(result.metadata).toEqual(expect.objectContaining({
+            disabledMcpServers: ['runweft'],
             claudeSessionId: 'claude-thread-1',
             codexSessionId: 'codex-thread-1',
             geminiSessionId: 'gemini-thread-1',

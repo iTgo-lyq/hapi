@@ -96,3 +96,9 @@ describe('claudeCommand arguments', () => {
         })
     })
 })
+
+it('claude keeps MCP suppression as HAPI session options', async () => {
+    runClaudeMock.mockClear()
+    await claudeCommand.run(createCommandContext(['--hapi-disable-mcp-server', 'runweft', '--hapi-disable-mcp-server', 'other']))
+    expect(runClaudeMock).toHaveBeenCalledWith({ disabledMcpServers: ['runweft', 'other'] })
+})

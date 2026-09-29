@@ -1992,6 +1992,10 @@ export function buildCliArgs(
                   ? 'agy'
                   : 'claude';
   const args = [agentCommand];
+  if (options.disabledMcpServers?.length) {
+    if (agent !== 'codex' && agent !== 'claude') throw new Error('MCP tool filtering is only supported for Codex and Claude');
+    for (const name of options.disabledMcpServers) args.push('--hapi-disable-mcp-server', name);
+  }
   if (options.resumeSessionId) {
     if (agent === 'codex') {
       args.push('resume', options.resumeSessionId);

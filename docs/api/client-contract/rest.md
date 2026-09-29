@@ -147,6 +147,10 @@ The configuration routes in the table above respond `{ok: true}`; apply-failures
 
 Source: `hub/src/web/routes/machines.ts`; schemas `SpawnSessionRequestSchema`, `MachineListDirectoryRequestSchema`, `MachinePathsExistsRequestSchema`, `RenameMachineRequestSchema` (`shared/src/apiTypes.ts`), `MachineSchema` (`shared/src/schemas.ts`).
 
+Optional durable `requestId` and per-session `disabledMcpServers` are described
+in [Spawn request receipts](../spawn-receipts.md), including capability checks
+and preserved filtering on resume.
+
 | Method & path | Request | Response |
 |---|---|---|
 | `GET /api/machines` | — | `{machines: Machine[]}` (online machines in the caller's namespace) |

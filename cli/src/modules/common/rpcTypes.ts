@@ -2,6 +2,7 @@ import type { AgentFlavor } from '@hapi/protocol'
 import type { CopilotAgentMode } from '@hapi/protocol'
 
 export interface SpawnSessionOptions {
+    disabledMcpServers?: string[]
     machineId?: string
     directory: string
     sessionId?: string

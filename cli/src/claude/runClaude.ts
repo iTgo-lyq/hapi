@@ -44,6 +44,7 @@ export interface StartOptions {
      * Distinct from `existingSessionId` / `--existing-session-id` (reopen).
      */
     reservedSessionId?: string
+    disabledMcpServers?: string[]
     workingDirectory?: string
     resumeSessionId?: string
 }
@@ -64,6 +65,7 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
         // throw new Error('Runner-spawned sessions cannot use local/interactive mode');
     }
 
+    const metadataOverrides = options.disabledMcpServers === undefined ? undefined : { disabledMcpServers: options.disabledMcpServers };
     const initialState: AgentState = {};
     const initialModel = normalizeClaudeSessionModel(options.model);
     const initialEffort = normalizeClaudeSessionEffort(options.effort);
@@ -72,7 +74,8 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
             sessionId: options.existingSessionId,
             flavor: 'claude',
             startedBy,
-            workingDirectory
+            workingDirectory,
+            metadataOverrides
         })
         : await bootstrapSession({
             flavor: 'claude',
@@ -81,7 +84,8 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
             agentState: initialState,
             model: initialModel ?? undefined,
             effort: initialEffort ?? undefined,
-            reservedSessionId: options.reservedSessionId
+            reservedSessionId: options.reservedSessionId,
+            metadataOverrides
         });
     const { api, session, sessionInfo } = bootstrap;
     logger.debug(`Session created: ${sessionInfo.id}`);
@@ -95,7 +99,7 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
 
     const loadCatalog = async () => {
         const [sdkMetadata, discoveredSkills] = await Promise.all([
-            extractSDKMetadata({ cwd: workingDirectory, claudeArgs: options.claudeArgs }),
+            extractSDKMetadata({ cwd: workingDirectory, claudeArgs: options.claudeArgs, disabledMcpServers: session.getMetadata()?.disabledMcpServers }),
             listSkills(workingDirectory, { flavor: 'claude' })
         ]);
         return {

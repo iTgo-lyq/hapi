@@ -241,7 +241,8 @@ export class RpcGateway {
         // latter is adopt-stub (create/getOrCreate with id), not reopen.
         forkSession?: boolean,
         /** Fresh machine-spawn stub — distinct from reopen existingSessionId. */
-        reservedSessionId?: string
+        reservedSessionId?: string,
+        disabledMcpServers?: string[]
     ): Promise<
         | { type: 'success'; sessionId: string }
         | {
@@ -272,6 +273,7 @@ export class RpcGateway {
                     serviceTier,
                     existingSessionId,
                     reservedSessionId,
+                    disabledMcpServers,
                     // Local HTTP / tracking may still read sessionId; prefer
                     // reserved stub id, then reopen id.
                     sessionId: reservedSessionId ?? existingSessionId,

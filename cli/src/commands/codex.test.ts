@@ -175,3 +175,9 @@ describe('codexCommand', () => {
         }
     })
 })
+
+it('codex keeps MCP suppression as HAPI session options', async () => {
+    runCodexMock.mockClear()
+    await codexCommand.run(createCommandContext(['--hapi-disable-mcp-server', 'runweft', '--hapi-disable-mcp-server', 'other']))
+    expect(runCodexMock).toHaveBeenCalledWith({ disabledMcpServers: ['runweft', 'other'] })
+})

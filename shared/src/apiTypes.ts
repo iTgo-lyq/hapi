@@ -4,6 +4,7 @@ import {
     CodexCollaborationModeSchema,
     CopilotAgentModeSchema,
     DecryptedMessageSchema,
+    DisabledMcpServersSchema,
     MachineSchema,
     PermissionModeSchema,
     SessionSchema
@@ -640,6 +641,7 @@ export type QueuedStateResponse = {
 }
 
 export const SpawnSessionRequestSchema = z.object({
+    disabledMcpServers: DisabledMcpServersSchema.optional(),
     requestId: z.string().uuid().optional(),
     directory: z.string().min(1),
     agent: AgentFlavorSchema.optional(),

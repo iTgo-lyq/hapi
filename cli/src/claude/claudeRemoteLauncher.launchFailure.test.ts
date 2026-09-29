@@ -45,6 +45,7 @@ function makeClient() {
         discardPendingHubPromptEcho: vi.fn(),
         discardPendingHubPromptEchoText: vi.fn(),
         sendAgentMessage: vi.fn(),
+        getMetadata: () => ({ disabledMcpServers: ['runweft'] }),
         keepAlive: vi.fn(),
         emitMessagesConsumed: vi.fn()
     };

@@ -53,7 +53,12 @@ export const WorktreeMetadataSchema = z.object({
 
 export type WorktreeMetadata = z.infer<typeof WorktreeMetadataSchema>
 
+export const McpServerNameSchema = z.string().regex(/^[A-Za-z0-9_-]+$/).max(128)
+export const DisabledMcpServersSchema = z.array(McpServerNameSchema).max(64)
+
 export const MetadataSchema = z.object({
+    /** Native per-session tool suppression, reapplied when this session resumes. */
+    disabledMcpServers: DisabledMcpServersSchema.optional(),
     path: z.string(),
     host: z.string(),
     version: z.string().optional(),
@@ -494,6 +499,7 @@ export const RunnerStateSchema = z.object({
     startedAt: z.number().optional(),
     capabilities: z.object({
         codexSharedRuntime: z.literal(true).optional(),
+        mcpToolFilter: z.literal(true).optional(),
         piExistingSessionResume: z.literal(true).optional(),
         agentConfigs: z.array(AgentConfigDescriptorSchema).optional()
     }).optional(),

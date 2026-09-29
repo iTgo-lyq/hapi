@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { disabledCodexMcpConfig } from '@/agent/mcpFilter';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { SessionBootstrapResult } from '@/agent/sessionFactory';
@@ -180,7 +181,8 @@ export class SharedCodexRoot {
         return { ...params, cwd: params.cwd ?? this.bootstrap.workingDirectory,
             developerInstructions: params.developerInstructions ?? getCodexSystemPrompt(), config: {
             ...record(params.config), 'mcp_servers.hapi': this.bridge.mcpServers.hapi,
-            'shell_environment_policy.set.HAPI_SESSION_ID': this.session.sessionId
+            'shell_environment_policy.set.HAPI_SESSION_ID': this.session.sessionId,
+            ...disabledCodexMcpConfig(this.bootstrap.metadata.disabledMcpServers)
         } };
     }
     async bind(threadId: string, response: Record<string, unknown>, subscribe: boolean): Promise<void> {

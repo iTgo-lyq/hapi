@@ -1,3 +1,4 @@
+import { McpServerNameSchema } from '@hapi/protocol/schemas'
 import chalk from 'chalk'
 import { authAndSetupMachineIfNeeded } from '@/ui/auth'
 import { initializeToken } from '@/ui/tokenInit'
@@ -44,6 +45,7 @@ export const codexCommand: CommandDefinition = {
                 resumeAll?: boolean
                 existingSessionId?: string
                 reservedSessionId?: string
+                disabledMcpServers?: string[]
                 model?: string
                 modelReasoningEffort?: ReasoningEffort
                 serviceTier?: string
@@ -82,6 +84,8 @@ export const codexCommand: CommandDefinition = {
                         throw new Error('Missing --hapi-session-id value')
                     }
                     options.reservedSessionId = sessionId
+                } else if (arg === '--hapi-disable-mcp-server') {
+                    (options.disabledMcpServers ??= []).push(McpServerNameSchema.parse(commandArgs[++i]))
                 } else if (arg === '--existing-session-id') {
                     const sessionId = commandArgs[++i]
                     if (!sessionId) {

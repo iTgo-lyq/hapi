@@ -167,10 +167,12 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
             }).catch(error => logger.debug('[Codex shared] root cleanup', error));
         }, 100);
     };
-    const prepare = async (cwd: string, existingSessionId?: string, parent?: SharedCodexRoot): Promise<SharedCodexRoot> => {
+    const prepare = async (cwd: string, existingSessionId?: string, parent?: SharedCodexRoot, disabledMcpServers?: string[]): Promise<SharedCodexRoot> => {
         assertRunning();
+        const disabled = disabledMcpServers ?? parent?.bootstrap.metadata.disabledMcpServers;
         const shared = { flavor: 'codex', startedBy: options.startedBy ?? 'terminal', workingDirectory: cwd,
             exportSessionEnv: false, reportStarted: false, metadataOverrides: { capabilities: { terminal: true, concurrentClients: true },
+                ...(disabled === undefined ? {} : { disabledMcpServers: disabled }),
                 ...(parent ? { forkedFrom: parent.session.sessionId } : {}) } } as const;
         // reservedSessionId names one preallocated hub row — single-use. A second
         // create()/fork must mint a fresh row, not re-adopt (#1911 Opus Major).
@@ -219,7 +221,7 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
         await notifyRunnerSessionStarted(root.session.sessionId, root.session.getMetadata() ?? root.bootstrap.metadata);
     };
     const create = (method: 'thread/start' | 'thread/fork', params: Record<string, unknown>, parent?: SharedCodexRoot, initialOptions?: SharedLaunchOptions): Promise<SharedCodexRoot> => operation(async () => {
-        const root = await prepare(string(params.cwd) ?? launch.cwd, undefined, parent);
+        const root = await prepare(string(params.cwd) ?? launch.cwd, undefined, parent, initialOptions?.disabledMcpServers);
         let nativeSucceeded = false;
         try {
             runtime.pendingCreations = [...runtime.pendingCreations ?? [], root.session.sessionId]; await persist();
@@ -360,7 +362,7 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
             // row's hostPid/metadata. Hold the lock until the reservation is durable.
             root = await withThreadOwnership(home, threadId, id, async () => {
                 const existing = options.existingSessionId ?? await findColdBinding(home, threadId);
-                const root = await prepare(launch.cwd, existing);
+                const root = await prepare(launch.cwd, existing, undefined, options.disabledMcpServers);
                 await reserveRecord(root, threadId); return root;
             });
             const params = root.config({ ...launch.threadParams, threadId });

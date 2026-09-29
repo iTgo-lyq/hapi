@@ -22,7 +22,7 @@ function setup(path = ':memory:') {
     cleanup.push(() => { engine.stop(); store.close() })
     for (const [id, namespace] of [['machine', 'default'], ['other', 'default'], ['foreign', 'tenant']]) {
         engine.getOrCreateMachine(id!, { host: 'local', platform: 'linux', happyCliVersion: '0.30.7',
-            capabilities: [MACHINE_CAPABILITIES.AgentAvailability] }, null, namespace!)
+            capabilities: [MACHINE_CAPABILITIES.AgentAvailability] }, { status: 'running', capabilities: { mcpToolFilter: true } }, namespace!)
     }
     const gateway = (engine as unknown as { rpcGateway: RpcGateway }).rpcGateway
     return { store, engine, gateway }
@@ -146,3 +146,27 @@ describe('durable spawn receipts', () => {
         expect(calls).toBe(1)
     })
 })
+
+it('persists and forwards MCP filtering and binds it to request identity', async () => {
+    const { engine, gateway, store } = setup();
+    gateway.spawnSession = async (...args) => {
+        expect(args[18]).toEqual(['runweft']);
+        expect(store.sessions.getSession(args[17]!)?.metadata).toMatchObject({ disabledMcpServers: ['runweft'] });
+        return { type: 'success', sessionId: args[17]! };
+    };
+    const input = { ...request(), disabledMcpServers: ['runweft'] };
+    const receipt = await engine.spawnSessionWithReceipt('default', 'machine', input);
+    expect(receipt.response?.type).toBe('success');
+    await expect(engine.spawnSessionWithReceipt('default', 'machine', { ...input, disabledMcpServers: [] })).rejects.toBeInstanceOf(SpawnRequestConflictError);
+});
+
+it('rejects unsupported runners and runtimes without spawning or retaining a live stub', async () => {
+    const { engine, gateway, store } = setup();
+    engine.getOrCreateMachine('old', { host: 'host', platform: 'linux', happyCliVersion: 'old' }, null, 'default');
+    gateway.spawnSession = async () => { throw new Error('must not dispatch'); };
+    for (const [machine, agent] of [['old', 'codex'], ['machine', 'cursor']] as const) {
+        const receipt = await engine.spawnSessionWithReceipt('default', machine, { ...request(), agent, disabledMcpServers: ['runweft'] });
+        expect(receipt.response).toMatchObject({ type: 'error', childStarted: false });
+        expect(store.sessions.getSession(receipt.sessionId)).toBeNull();
+    }
+});

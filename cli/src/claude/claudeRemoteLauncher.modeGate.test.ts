@@ -92,6 +92,7 @@ function createClientStub() {
             }
         },
         rpcHandlers,
+        getMetadata: () => ({ disabledMcpServers: ['runweft'] }),
         keepAlive: () => {},
         updateMetadata: (mutator: (metadata: any) => any) => { mutator({}) },
         emitMessagesConsumed: () => {},

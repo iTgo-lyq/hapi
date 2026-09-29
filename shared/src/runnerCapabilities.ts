@@ -16,6 +16,7 @@ import { getBuiltinAgentConfigDescriptors } from './agentConfig'
 
 export const RUNNER_CAPABILITIES = {
     codexSharedRuntime: true as const,
+    mcpToolFilter: true as const,
     piExistingSessionResume: true as const,
     agentConfigs: getBuiltinAgentConfigDescriptors()
 }

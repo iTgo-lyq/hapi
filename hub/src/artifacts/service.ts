@@ -3,7 +3,7 @@ import { constants } from 'node:fs'
 import { mkdir, open, rename, rm, type FileHandle } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
-import type { Artifact, ArtifactLimits, ArtifactReserve } from '@hapi/protocol'
+import type { Artifact, ArtifactLimits, ArtifactReserve, ArtifactPrune, ArtifactPruneResult } from '@hapi/protocol'
 import type { ArtifactStore } from '../store/artifactStore'
 import { ArtifactError, artifactProblem } from './errors'
 
@@ -122,14 +122,40 @@ export class ArtifactService {
         // Node and Bun declare different BYOB overloads for this same web stream.
         return { artifact, body: Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array> }
     }
+    async prune(namespace: string, request: ArtifactPrune): Promise<ArtifactPruneResult> {
+        const checkedAt = Date.now()
+        const rows = this.store.pruneCandidates(namespace, this.limits, checkedAt, request.after ?? '', request.limit + 1)
+        const page = rows.slice(0, request.limit)
+        const result: ArtifactPruneResult = { applied: request.apply, checkedAt, candidates: [], deleted: [], failures: [],
+            nextCursor: rows.length > request.limit ? page.at(-1)!.id : null, usedBytes: this.store.usage(namespace) }
+        for (const row of page) {
+            try {
+                await this.exclusive(row.id, async () => {
+                    // A recovered publication gets its actual publication time before age is checked.
+                    const current = await this.reconcile(this.store.get(namespace, row.id))
+                    const eligible = current.state === 'deleting'
+                        || (current.state === 'available' && current.publishedAt! <= checkedAt - this.limits.unreferencedDays * 86400000)
+                        || (current.state === 'reserved' && current.createdAt <= checkedAt - this.limits.pendingHours * 3600000)
+                    if (!eligible) throw new ArtifactError(409, 'artifact_not_expired', 'File is no longer eligible for expiry cleanup.')
+                    if (this.store.references(namespace, row.id).length) throw new ArtifactError(409, 'artifact_referenced', 'File acquired a retention reference after cleanup selection.')
+                    result.candidates.push(current)
+                    if (request.apply) result.deleted.push(await this.deleteBytes(namespace, row.id))
+                })
+            } catch (error) { result.failures.push({ id: row.id, error: artifactProblem(error) }) }
+        }
+        result.usedBytes = this.store.usage(namespace)
+        return result
+    }
+    private async deleteBytes(namespace: string, id: string): Promise<Artifact> {
+        // This transaction rechecks references and prevents a new pin while bytes are removed.
+        const artifact = this.store.beginDelete(namespace, id)
+        if (artifact.state === 'deleted') return artifact
+        const path = this.file(namespace, id)
+        await rm(path, { force: true }); await rm(`${path}.part`, { force: true })
+        return this.store.deleted(namespace, id)
+    }
     async remove(namespace: string, id: string): Promise<Artifact> {
         this.store.get(namespace, id)
-        return this.exclusive(id, async () => {
-            const artifact = this.store.beginDelete(namespace, id)
-            if (artifact.state === 'deleted') return artifact
-            const path = this.file(namespace, id)
-            await rm(path, { force: true }); await rm(`${path}.part`, { force: true })
-            return this.store.deleted(namespace, id)
-        })
+        return this.exclusive(id, () => this.deleteBytes(namespace, id))
     }
 }

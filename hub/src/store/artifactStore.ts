@@ -27,6 +27,24 @@ export class ArtifactStore {
         return (this.db.query("SELECT COALESCE(SUM(size),0) AS bytes FROM artifacts WHERE namespace=? AND state<>'deleted'")
             .get(namespace) as { bytes: number }).bytes
     }
+    usageDetails(namespace: string) {
+        return this.db.query(`SELECT
+            COALESCE(SUM(CASE WHEN state='reserved' THEN size ELSE 0 END),0) AS reservedBytes,
+            COALESCE(SUM(CASE WHEN state='available' THEN size ELSE 0 END),0) AS availableBytes,
+            COALESCE(SUM(CASE WHEN state='deleting' THEN size ELSE 0 END),0) AS deletingBytes,
+            COALESCE(SUM(CASE WHEN pinned THEN size ELSE 0 END),0) AS referencedBytes,
+            COUNT(*) AS objectCount, COALESCE(SUM(pinned),0) AS referencedCount
+            FROM (SELECT a.*, EXISTS(SELECT 1 FROM artifact_references r WHERE r.namespace=a.namespace AND r.artifact_id=a.id) AS pinned
+                FROM artifacts a WHERE namespace=? AND state<>'deleted')`).get(namespace) as {
+                    reservedBytes: number; availableBytes: number; deletingBytes: number; referencedBytes: number; objectCount: number; referencedCount: number
+                }
+    }
+    pruneCandidates(namespace: string, limits: ArtifactLimits, now: number, after: string, limit: number): Artifact[] {
+        return (this.db.query(`SELECT a.* FROM artifacts a WHERE namespace=? AND id>?
+            AND (state='deleting' OR (state='available' AND published_at<=?) OR (state='reserved' AND created_at<=?))
+            AND NOT EXISTS(SELECT 1 FROM artifact_references r WHERE r.namespace=a.namespace AND r.artifact_id=a.id)
+            ORDER BY id LIMIT ?`).all(namespace, after, now - limits.unreferencedDays * 86400000, now - limits.pendingHours * 3600000, limit) as Row[]).map(object)
+    }
     list(namespace: string, offset = 0, limit = 50): Artifact[] {
         return (this.db.query('SELECT * FROM artifacts WHERE namespace=? ORDER BY created_at DESC,id LIMIT ? OFFSET ?')
             .all(namespace, limit, offset) as Row[]).map(object)

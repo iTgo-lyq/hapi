@@ -32,3 +32,19 @@ export const ArtifactSchema = z.object({
     error: z.object({ code: z.string(), message: z.string(), hint: z.string().optional() }).nullable(),
 })
 export type Artifact = z.infer<typeof ArtifactSchema>
+
+export const ArtifactUsageSchema = z.object({
+    reservedBytes: z.number().int().nonnegative(), availableBytes: z.number().int().nonnegative(),
+    deletingBytes: z.number().int().nonnegative(), referencedBytes: z.number().int().nonnegative(),
+    objectCount: z.number().int().nonnegative(), referencedCount: z.number().int().nonnegative(),
+})
+export const ArtifactPruneSchema = z.strictObject({
+    apply: z.boolean().default(false), limit: z.number().int().min(1).max(200).default(100), after: z.string().uuid().optional(),
+})
+export type ArtifactPrune = z.infer<typeof ArtifactPruneSchema>
+export const ArtifactPruneResultSchema = z.object({
+    applied: z.boolean(), checkedAt: z.number(), candidates: z.array(ArtifactSchema), deleted: z.array(ArtifactSchema),
+    failures: z.array(z.object({ id: z.string().uuid(), error: z.object({ code: z.string(), message: z.string(), hint: z.string().optional() }) })),
+    nextCursor: z.string().uuid().nullable(), usedBytes: z.number().int().nonnegative(),
+})
+export type ArtifactPruneResult = z.infer<typeof ArtifactPruneResultSchema>

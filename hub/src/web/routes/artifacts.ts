@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import { z } from 'zod'
-import { ArtifactReferenceSchema, ArtifactReserveSchema } from '@hapi/protocol'
+import { ArtifactPruneSchema, ArtifactReferenceSchema, ArtifactReserveSchema } from '@hapi/protocol'
 import { ArtifactError, artifactProblem } from '../../artifacts/errors'
 import type { ArtifactService } from '../../artifacts/service'
 
@@ -28,13 +28,14 @@ export function createArtifactRoutes(service: ArtifactService): Hono<Env> {
         return controlLimit(c, next)
     })
     app.onError((error, c) => c.json({ error: artifactProblem(error) }, error instanceof ArtifactError ? error.status : 503))
-    app.get('/artifacts/limits', c => c.json({ limits: service.limits, usedBytes: service.store.usage(c.get('namespace')) }))
+    app.get('/artifacts/limits', c => c.json({ limits: service.limits, usedBytes: service.store.usage(c.get('namespace')), usage: service.store.usageDetails(c.get('namespace')) }))
     app.get('/artifacts', c => {
         const { offset, limit } = parse(paging, c.req.query())
         const artifacts = service.store.list(c.get('namespace'), offset, limit + 1)
         return c.json({ artifacts: artifacts.slice(0, limit), nextOffset: artifacts.length > limit ? offset + limit : null })
     })
     app.post('/artifacts', async c => c.json({ artifact: service.reserve(c.get('namespace'), parse(ArtifactReserveSchema, await json(c))) }))
+    app.post('/artifacts/prune', async c => c.json(await service.prune(c.get('namespace'), parse(ArtifactPruneSchema, await json(c)))))
     app.get('/artifacts/requests/:requestId', async c => {
         const artifact = service.store.byRequest(c.get('namespace'), c.req.param('requestId'))
         return c.json({ artifact: await service.inspect(c.get('namespace'), artifact.id) })

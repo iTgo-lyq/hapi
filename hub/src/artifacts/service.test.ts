@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
@@ -98,6 +99,85 @@ describe('Hub persistent artifacts', () => {
         const empty = service.reserve('n', request(''))
         expect((await service.upload('n', empty.id, null)).state).toBe('available')
         expect(await new Response((await service.content('n', empty.id)).body).text()).toBe('')
+    })
+    it('previews expiry without deleting, preserves every reference purpose, and accounts for quota once', async () => {
+        const { service, root } = await fixture()
+        const files = []
+        for (const purpose of [null, 'input', 'output', 'recovery', 'external']) {
+            const file = service.reserve('n', request('retained'))
+            await service.upload('n', file.id, body('retained'))
+            if (purpose) service.store.pin('n', file.id, { reference: `owner:${purpose}`, purpose })
+            files.push(file)
+        }
+        const pending = service.reserve('n', request('pending'))
+        const other = service.reserve('other', request('other namespace'))
+        const db = new Database(join(root, 'hapi.db'))
+        db.query('UPDATE artifacts SET created_at=?,published_at=CASE WHEN published_at IS NULL THEN NULL ELSE ? END')
+            .run(Date.now() - 8 * 86400000, Date.now() - 8 * 86400000)
+        db.close()
+        const recent = service.reserve('n', request('new'))
+        const before = service.store.usage('n')
+        const preview = await service.prune('n', { apply: false, limit: 100 })
+        expect(preview.candidates.map(file => file.id).sort()).toEqual([files[0]!.id, pending.id].sort())
+        expect(preview.deleted).toHaveLength(0)
+        expect(service.store.usage('n')).toBe(before)
+        expect(service.store.usageDetails('n')).toEqual({ reservedBytes: 10, availableBytes: 40, deletingBytes: 0, referencedBytes: 32, objectCount: 7, referencedCount: 4 })
+        const done = await service.prune('n', { apply: true, limit: 100 })
+        expect(done.failures).toEqual([])
+        expect(done.deleted.map(file => file.id).sort()).toEqual(preview.candidates.map(file => file.id).sort())
+        expect(done.usedBytes).toBe(before - 15)
+        expect(service.store.byRequest('n', files[0]!.requestId).state).toBe('deleted')
+        await expect(service.content('n', files[0]!.id)).rejects.toMatchObject({ code: 'artifact_deleted' })
+        expect(service.store.get('n', recent.id).state).toBe('reserved')
+        expect(service.store.get('other', other.id).state).toBe('reserved')
+        expect((await service.prune('n', { apply: true, limit: 100 })).candidates).toHaveLength(0)
+    })
+    it('rechecks late pins, rejects active uploads, and does not expire a recovered fresh publication', async () => {
+        const { service, root } = await fixture()
+        const pinned = service.reserve('n', request('published'))
+        await service.upload('n', pinned.id, body('published'))
+        const active = service.reserve('n', request('uploading'))
+        const recovered = service.reserve('n', request('recovered'))
+        const db = new Database(join(root, 'hapi.db'))
+        db.query('UPDATE artifacts SET created_at=?,published_at=?').run(Date.now() - 8 * 86400000, Date.now() - 8 * 86400000)
+        db.close()
+        const folder = join(root, 'artifacts', createHash('sha256').update('n').digest('hex'))
+        await writeFile(join(folder, recovered.id), 'recovered')
+        let writer!: ReadableStreamDefaultController<Uint8Array>
+        const uploading = service.upload('n', active.id, new ReadableStream({ start(controller) { writer = controller } }))
+        const cleanup = service.prune('n', { apply: true, limit: 100 })
+        service.store.pin('n', pinned.id, { reference: 'late', purpose: 'input' })
+        const result = await cleanup
+        expect(result.deleted).toHaveLength(0)
+        expect(result.failures.map(item => item.error.code).sort()).toEqual(['artifact_busy', 'artifact_not_expired', 'artifact_referenced'])
+        expect((await service.inspect('n', recovered.id)).state).toBe('available')
+        writer.enqueue(Buffer.from('uploading')); writer.close()
+        expect((await uploading).state).toBe('available')
+    })
+    it('uses a stable cursor during deletion and resumes a failed deletion after reopening the service', async () => {
+        const { service, root } = await fixture()
+        const ids: string[] = []
+        for (let index = 0; index < 3; index++) ids.push(service.reserve('n', request('bytes')).id)
+        const db = new Database(join(root, 'hapi.db'))
+        db.query('UPDATE artifacts SET created_at=?').run(Date.now() - 2 * 86400000); db.close()
+        ids.sort()
+        const blockedPath = join(root, 'artifacts', createHash('sha256').update('n').digest('hex'), `${ids[0]!}.part`)
+        await mkdir(blockedPath, { recursive: true }) // Real filesystem failure after marking deleting.
+        const first = await service.prune('n', { apply: true, limit: 1 })
+        expect(first.nextCursor).toBe(ids[0]!)
+        expect(first.failures[0]?.error.code).toBe('artifact_io_failed')
+        expect(service.store.usageDetails('n').deletingBytes).toBe(5)
+        const second = await service.prune('n', { apply: true, limit: 1, after: first.nextCursor! })
+        expect(second.deleted[0]?.id).toBe(ids[1]!)
+        const third = await service.prune('n', { apply: true, limit: 1, after: second.nextCursor! })
+        expect(third.deleted[0]?.id).toBe(ids[2]!); expect(third.nextCursor).toBeNull()
+        await rm(blockedPath, { recursive: true })
+        const reopened = new Store(join(root, 'hapi.db'))
+        try {
+            const restarted = new ArtifactService(reopened.artifacts, service.root, service.limits)
+            const final = await restarted.prune('n', { apply: true, limit: 100 })
+            expect(final.deleted[0]?.id).toBe(ids[0]!); expect(final.usedBytes).toBe(0)
+        } finally { reopened.close() }
     })
     it('validates logical filenames without restricting Chinese or spaces', () => {
         expect(request('a').filename).toBe('需求 brief.txt')

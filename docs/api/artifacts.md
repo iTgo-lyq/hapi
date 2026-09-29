@@ -56,6 +56,31 @@ interrupted deletion can be retried. Published bytes are immutable through the
 API. Callers own their task/reference lifecycle; this API does not infer task
 completion or release pins when an agent disconnects.
 
+### Expiry cleanup and usage
+
+`POST /artifacts/prune` accepts `{apply?: boolean, limit?: number, after?: UUID}`.
+It defaults to preview and 100 objects (maximum 200). The response contains
+`candidates`, `deleted`, per-object `failures`, `usedBytes`, `checkedAt`, and
+`nextCursor`; pass the cursor as `after` to inspect the next page. Cursor order
+is object ID, so deletions do not shift the remaining page. Repeating a sweep
+without `after` also retries interrupted deletions. A partial response does not
+claim all candidates were deleted; inspect their IDs after a lost response.
+
+Only objects without any reference qualify. Available objects age from
+`publishedAt` for `unreferencedDays` (default 7), reservations from `createdAt`
+for `pendingHours` (default 24). Unpinning does not reset those timestamps.
+Objects already marked `deleting` resume deletion. Before each action the Hub
+rechecks current state, age and references under the existing object lock;
+active uploads fail with `artifact_busy`. A publication recovered from disk
+gets its publication timestamp before the expiry check. Preview never removes
+bytes. No scheduled cleanup runs implicitly.
+
+`GET /artifacts/limits` also returns `usage`: `reservedBytes`, `availableBytes`,
+`deletingBytes`, `referencedBytes`, `objectCount`, `referencedCount`. These count
+non-deleted object reservations once, even if an object has several references;
+referenced bytes are a subset of the state totals. This is quota accounting,
+not physical disk usage. Runner inputs/spool and SQLite metadata are separate.
+
 ## Storage and configuration
 
 The existing Hub SQLite database stores metadata and references. Bytes and

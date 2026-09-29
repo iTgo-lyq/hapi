@@ -1,14 +1,15 @@
-# Repository baseline exports
+# Repository baselines and caches
 
-`POST /api/machines/:id/repositories` uses the existing client JWT, machine namespace and Runner RPC. An online Runner advertising `repositoryExport: 1` can create fixed repository export candidates without a native agent session. Import and remote task orchestration are separate capabilities.
+`POST /api/machines/:id/repositories` uses the existing client JWT, machine namespace and Runner RPC. An online Runner advertising `repositoryExport: 1` can export a fixed baseline; `repositoryImport: 1` adds independently verified target caches. Neither operation starts a native session.
 
 ## Operations
 
 - `export`: `{ action, operationId, source }`, where `source` is the fixed `WorkspaceSource` returned by the managed-workspace resolve operation. The source commit is required; export never resolves a moving branch again.
+- `import`: `{ action, operationId, snapshot, files: [{ name, path }] }`. Files must exactly match the snapshot and be present at allowed absolute paths, normally returned by artifact materialization. Success returns `imported.source` and the owned root/submodule cache mapping.
 - `inspect`: `{ action, operationId }` returns the original operation, immutable snapshot and any error.
 - `release`: `{ action, operationId, names? }` removes stopped export candidates. Names select already declared files; omission releases all candidates and scratch data. The receipt and snapshot remain queryable.
 
-Export returns a persisted `accepted` receipt and runs in the background. Inspect reports `accepted`, `running`, `succeeded`, `failed` or `unknown`. Repeating the same export ID and arguments returns the original receipt; different arguments conflict. A restarted Runner reconciles the saved Git process before allowing cleanup. Incomplete, stopped exports become explicit failures and are not automatically rerun. Use a new operation with the original fixed commit after repairing the source.
+Export/import return persisted `accepted` receipts and run in the background. Inspect reports `accepted`, `running`, `succeeded`, `failed` or `unknown`. Repeating the same ID and arguments returns the original receipt; different arguments conflict. A restarted Runner reconciles the saved Git process. Incomplete, stopped operations become explicit failures and are not automatically rerun. Use a new operation with the original snapshot after repairing the error. Inspecting a successful import also checks its source ownership and retained refs.
 
 ## Content and ownership
 
@@ -20,4 +21,16 @@ Export uses scratch bare repositories with read-only source object alternates. R
 
 Full Git history reachable from the selected commit is exported. Shallow repositories, missing submodule commits and missing/corrupt LFS entities fail explicitly. Submodule objects must already exist in the source. LFS enumeration uses git-lfs when required, including custom source storage; repositories without LFS can export without that executable. Historical commits' LFS entities are not included unless required by the selected baseline tree.
 
-A successful export means candidates are fixed, not that an execution workspace is ready. A recipient must independently import and validate bundle format, references and complete object closure before preparing a worktree. No import, checkout, native execution or code-result delivery is implied by this endpoint.
+A successful export means candidates are fixed. Import independently verifies bundle format, references and complete object closure before a workspace can be prepared.
+
+## Target import and managed workspaces
+
+Import first fixes and hashes the downloaded files under `workspaces/imports/<operationId>/data`, then imports each bundle into an empty bare verification repository without alternates or promisor configuration. Git must accept exactly the declared ref and commit, verify the bundle and pass object checking; a warm cache cannot supply missing prerequisite objects. The fixed tree must match the recursive gitlink and LFS manifest.
+
+Verified objects enter `workspaces/repositories/<origin-key>/`. The key includes the Hub/authentication scope and source machine/repository identity. Multiple snapshots share caches; each has its own immutable ref. Import writes and managed-workspace operations use the same root repository lock. Bare HEAD stays on the initial `refs/heads/cache-base` and each environment has its own task branch/worktree. Import scratch data is removed on success; the caller can immediately release materialized downloads. Receipts remain under `workspaces/imports/<operationId>/operation.json`.
+
+`imported.source` describes the target bare root, with the target machine/repository identity and `snapshot: { importOperationId, manifestId }`. It initially has `relativePath: ''`; a consumer may use its original source-relative cwd. Managed preparation validates that directory in the fixed commit and checks the saved import receipt, mapping and refs. It rejects a cache source with a missing or mismatched snapshot marker.
+
+Pass this source to the existing workspace `prepare` operation. Submodules are initialized one level at a time from owned local caches, with checkout-scoped URL/active configuration; recursive names and relative upstream URLs cannot redirect downloads to the original source. LFS filters/storage are configured only in owned repositories, without requiring global filter configuration or installing hooks. Local entity copies and `lfs checkout` hydrate the files; cache workspaces never call `lfs pull`. Preparation hashes the resulting LFS bytes. Launch rechecks Git state, inputs, snapshot refs/gitlinks, and LFS checkout/downloaded flags without another full large-file hash scan.
+
+Subsequent rounds use the existing finalize/prepare lifecycle and the last sealed result, including new local LFS objects. Original local workspace sources retain their existing behavior. Candidate `release` does not remove imports or caches; those remain retained pending explicit workspace-aware cache cleanup. Remote task orchestration and code-result delivery are separate consumer responsibilities.

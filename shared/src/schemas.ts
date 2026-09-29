@@ -508,6 +508,7 @@ export const RunnerStateSchema = z.object({
         artifactTransfers: z.literal(1).optional(),
         artifactOutputs: z.literal(1).optional(),
         repositoryExport: z.literal(1).optional(),
+        repositoryImport: z.literal(1).optional(),
         agentAvailabilityDetails: z.literal(true).optional(),
         piExistingSessionResume: z.literal(true).optional(),
         agentConfigs: z.array(AgentConfigDescriptorSchema).optional()

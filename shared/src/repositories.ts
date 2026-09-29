@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { ArtifactNameSchema } from './artifacts'
-import { WorkspaceSourceSchema, type WorkspaceProblem } from './workspaces'
+import { WorkspaceSourceSchema, type WorkspaceProblem, type WorkspaceSource } from './workspaces'
 
 const id = z.string().uuid()
 const sha = z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/)
@@ -28,16 +28,20 @@ export type RepositorySnapshot = z.infer<typeof RepositorySnapshotSchema>
 export type RepositoryFile = z.infer<typeof RepositoryFileSchema>
 export const RepositoryRequestSchema = z.discriminatedUnion('action', [
     z.strictObject({ action: z.literal('export'), operationId: id, source: WorkspaceSourceSchema }),
+    z.strictObject({ action: z.literal('import'), operationId: id, snapshot: RepositorySnapshotSchema,
+        files: z.array(z.strictObject({ name: ArtifactNameSchema, path: z.string().min(1).max(4096) })).min(1) }),
     z.strictObject({ action: z.literal('inspect'), operationId: id }),
     z.strictObject({ action: z.literal('release'), operationId: id, names: z.array(ArtifactNameSchema).min(1).optional() }),
 ])
 export type RepositoryRequest = z.infer<typeof RepositoryRequestSchema>
 export type RepositoryExportRequest = Extract<RepositoryRequest, { action: 'export' }>
+export type RepositoryImportRequest = Extract<RepositoryRequest, { action: 'import' }>
+export type RepositoryImport = { source: WorkspaceSource; repositories: Array<{ path: string; directory: string; ref: string }> }
 export type RepositoryOperation = {
-    version: 1; request: RepositoryExportRequest; directory: string;
+    version: 1; request: RepositoryExportRequest | RepositoryImportRequest; directory: string;
     status: 'accepted' | 'running' | 'succeeded' | 'failed' | 'unknown';
     retention: 'retained' | 'releasing' | 'released'; releasedFiles: string[];
-    createdAt: number; updatedAt: number; snapshot?: RepositorySnapshot; error?: WorkspaceProblem;
+    createdAt: number; updatedAt: number; snapshot?: RepositorySnapshot; imported?: RepositoryImport; error?: WorkspaceProblem;
     process?: { pid: number; marker: string | null };
 }
 export type RepositoryResponse = { operation: RepositoryOperation } | { error: WorkspaceProblem }

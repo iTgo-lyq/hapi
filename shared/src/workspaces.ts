@@ -9,6 +9,7 @@ export type PreparedWorkspace = z.infer<typeof PreparedWorkspaceSchema>
 export const WorkspaceSourceSchema = z.strictObject({
     machineId: z.string().min(1), repositoryId: z.string().min(1), sourcePath: path,
     repositoryRoot: path, commonDir: path, relativePath: z.string(),
+    snapshot: z.strictObject({ importOperationId: id, manifestId: id }).optional(),
     baseRef: z.string().min(1), baseCommit: sha, objectFormat: z.enum(['sha1', 'sha256']), dirty: z.boolean(),
 })
 export type WorkspaceSource = z.infer<typeof WorkspaceSourceSchema>

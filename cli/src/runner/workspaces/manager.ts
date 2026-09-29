@@ -7,6 +7,7 @@ import { WorkspaceRequestSchema, type ManagedWorkspace, type PreparedWorkspace,
     type WorkspaceSource } from '@hapi/protocol'
 import { MachinePathPolicy } from '@/api/machinePathPolicy'
 import { git, gitProcessStopped, output, WorkspaceError, workspaceProblem, type GitOptions } from './git'
+import type { RepositoryCache } from '../repositories/cache'
 
 type Prepare = Extract<WorkspaceRequest, { action: 'prepare' }>
 type Finalize = Extract<WorkspaceRequest, { action: 'finalize' }>
@@ -32,7 +33,7 @@ export class WorkspaceManager {
     private readonly jobs = new Map<string, Promise<void>>()
     private readonly locks = new Map<string, Promise<void>>()
     constructor(private readonly options: { home: string; machineId: string; pathPolicy: MachinePathPolicy;
-        assertStopped: (sessionId: string) => Promise<void>; gitTimeoutMs?: number }) {
+        assertStopped: (sessionId: string) => Promise<void>; gitTimeoutMs?: number; snapshots?: RepositoryCache }) {
         mkdirSync(options.home, { recursive: true, mode: 0o700 })
         this.root = join(realpathSync(options.home), 'workspaces')
     }
@@ -67,6 +68,7 @@ export class WorkspaceManager {
         this.locks.set(key, busy)
         return operation
     }
+    withRepositoryLock<T>(key: string, action: () => Promise<T>) { return this.serial(key, action) }
     private async allowed(path: string) {
         if (!await this.options.pathPolicy.allowsSpawn(path)) return problem('outside_workspace_roots', 'Workspace path is outside the configured Runner roots.', path)
     }
@@ -165,6 +167,10 @@ export class WorkspaceManager {
     }
     private async source(workspace: ManagedWorkspace) {
         const source = workspace.source
+        if (source.snapshot) {
+            if (!this.options.snapshots) return problem('repository_import_unavailable', 'Runner repository cache is not configured.')
+            await this.options.snapshots.validateSource(source)
+        } else if (inside(join(this.root, 'repositories'), source.commonDir)) return problem('repository_snapshot_required', 'Cache sources require a saved import receipt.')
         await this.allowed(source.repositoryRoot); await this.allowed(workspace.checkout)
         if (source.repositoryId !== digest(JSON.stringify([source.machineId, source.commonDir, source.objectFormat]))) return problem('workspace_repository_changed', 'Workspace repository identity does not match its source.')
         if (source.machineId !== this.options.machineId) return problem('workspace_machine_mismatch', 'Workspace source belongs to another machine.')
@@ -214,6 +220,7 @@ export class WorkspaceManager {
         await this.validate(workspace)
         if (await this.head(workspace) !== request.expectedHead || !await this.clean(workspace)) return problem('workspace_drift', 'Checkout differs from its recorded starting result.', workspace.checkout)
         await this.hydrate(workspace, options)
+        if (workspace.source.snapshot && !await this.clean(workspace)) return problem('workspace_drift', 'Snapshot checkout is not clean after asset preparation.')
         const cwd = realpathSync(workspace.cwd)
         if (!inside(workspace.checkout, cwd) || !statSync(cwd).isDirectory()) return problem('workspace_cwd_missing', 'The prepared working directory is unavailable.')
         const inputs: WorkspacePreparation['inputs'] = []
@@ -235,6 +242,7 @@ export class WorkspaceManager {
             roundId: request.roundId, cwd, startHead: request.expectedHead, inputs, readyAt: Date.now() }
     }
     private async hydrate(workspace: ManagedWorkspace, options: GitOptions) {
+        if (workspace.source.snapshot) return this.options.snapshots!.hydrate(workspace.source, workspace.checkout, options)
         const cwd = workspace.checkout
         if (existsSync(join(cwd, '.gitmodules'))) {
             const modules = await git(cwd, ['config', '--file', '.gitmodules', '--null', '--get-regexp', '^submodule\\..*\\.path$'], { allowFailure: true })
@@ -439,6 +447,7 @@ export class WorkspaceManager {
         if (workspace.results[preparation.roundId]) return problem('workspace_preparation_expired', 'This preparation belongs to an already sealed round.')
         await this.validate(workspace)
         if (realpathSync(directory) !== preparation.cwd || await this.head(workspace) !== preparation.startHead || !await this.clean(workspace)) return problem('workspace_preparation_stale', 'Prepared cwd or Git state changed before launch.')
+        if (workspace.source.snapshot) await this.options.snapshots!.hydrate(workspace.source, workspace.checkout, this.gitOptions(), true)
         for (const input of preparation.inputs) {
             const bytes = await fileDigest(input.path)
             if (bytes.size !== input.size || bytes.sha256 !== input.sha256) return problem('workspace_input_mismatch', 'Prepared input changed before launch.', input.name)

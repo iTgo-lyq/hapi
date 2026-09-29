@@ -22,7 +22,7 @@ function setup(path = ':memory:') {
     cleanup.push(() => { engine.stop(); store.close() })
     for (const [id, namespace] of [['machine', 'default'], ['other', 'default'], ['foreign', 'tenant']]) {
         engine.getOrCreateMachine(id!, { host: 'local', platform: 'linux', happyCliVersion: '0.30.7',
-            capabilities: [MACHINE_CAPABILITIES.AgentAvailability] }, { status: 'running', capabilities: { mcpToolFilter: true, managedWorkspaces: 1, artifactTransfers: 1, artifactOutputs: 1, repositoryExport: 1 } }, namespace!)
+            capabilities: [MACHINE_CAPABILITIES.AgentAvailability] }, { status: 'running', capabilities: { mcpToolFilter: true, managedWorkspaces: 1, artifactTransfers: 1, artifactOutputs: 1, repositoryExport: 1, repositoryImport: 1 } }, namespace!)
         engine.handleMachineAlive({ machineId: id!, time: Date.now() })
     }
     const gateway = (engine as unknown as { rpcGateway: RpcGateway }).rpcGateway
@@ -318,6 +318,23 @@ it('routes machine file operations within namespace and rejects release while an
     engine.getOrCreateSession('files-active', { path: '/workspace', host: 'local', machineId: 'machine', flavor: 'codex', preparedFiles: { operationId } }, null, 'default')
     expect(await (await post('machine', { action: 'release', operationId })).json()).toMatchObject({ code: 'artifact_execution_active' })
     expect(calls).toHaveLength(1)
+})
+
+it('requires repositoryImport separately from export capability', async () => {
+    const { engine, gateway } = setup()
+    const request = { action: 'import' as const, operationId: crypto.randomUUID(), files: [{ name: 'root.bundle', path: '/inputs/root.bundle' }],
+        snapshot: { version: 1 as const, manifestId: crypto.randomUUID(), sourceMachineId: 'source', repositoryId: 'origin', baseCommit: 'a'.repeat(40), objectFormat: 'sha1' as const,
+            repositories: [{ path: '', commit: 'a'.repeat(40), objectFormat: 'sha1' as const, bundleRef: 'refs/heads/base', file: 'root.bundle' }], lfs: [],
+            files: [{ name: 'root.bundle', kind: 'bundle' as const, sha256: 'b'.repeat(64), size: 100 }] } }
+    let calls = 0
+    gateway.repositoryOperation = async () => { calls++; return { error: { code: 'probe', message: 'reached runner' } } }
+    engine.getOrCreateMachine('export-only', { host: 'host', platform: 'linux', happyCliVersion: 'old' }, { status: 'running', capabilities: { repositoryExport: 1 } }, 'default')
+    engine.handleMachineAlive({ machineId: 'export-only', time: Date.now() })
+    expect(await engine.repositoryOperation('export-only', 'default', request)).toMatchObject({ error: { code: 'runner_upgrade_required' } })
+    expect(await engine.repositoryOperation('foreign', 'default', request)).toMatchObject({ error: { code: 'machine_not_found' } })
+    expect(calls).toBe(0)
+    expect(await engine.repositoryOperation('machine', 'default', request)).toMatchObject({ error: { code: 'probe' } })
+    expect(calls).toBe(1)
 })
 
 it('gates output operations on Runner support and forwards declared candidates without a native session', async () => {

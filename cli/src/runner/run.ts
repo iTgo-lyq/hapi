@@ -38,6 +38,7 @@ import { startRunnerControlServer } from './controlServer';
 import { ArtifactTransferManager } from './artifacts/manager';
 import { WorkspaceManager } from './workspaces/manager';
 import { RepositoryManager } from './repositories/manager';
+import { RepositoryCache } from './repositories/cache';
 import { WorkspaceError } from './workspaces/git';
 import { MachinePathPolicy } from '@/api/machinePathPolicy';
 import { createWorktree, removeWorktree, type WorktreeInfo } from './worktree';
@@ -600,10 +601,13 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       if (runtimes.some(runtime => runtime.sessions[id]?.active === false) || hasVerifiedExit(id)) return;
       throw new WorkspaceError('workspace_execution_unknown', 'Runner has no verified stop evidence for this session.');
     };
+    const snapshots = new RepositoryCache({ home: configuration.happyHomeDir, machineId,
+      scope: `${configuration.apiUrl}:${runtimeAuthHash()}`, pathPolicy: new MachinePathPolicy({ workspaceRoots }) });
     const workspaces = new WorkspaceManager({
-      home: configuration.happyHomeDir, machineId, pathPolicy: new MachinePathPolicy({ workspaceRoots }), assertStopped,
+      home: configuration.happyHomeDir, machineId, pathPolicy: new MachinePathPolicy({ workspaceRoots }), assertStopped, snapshots,
     });
     const repositories = new RepositoryManager({
+      cache: snapshots, withRepositoryLock: (key, action) => workspaces.withRepositoryLock(key, action),
       home: configuration.happyHomeDir, pathPolicy: new MachinePathPolicy({ workspaceRoots }),
       resolveSource: (cwd, baseRef, options, readDirty) => workspaces.resolveSource(cwd, baseRef, options, readDirty),
     });

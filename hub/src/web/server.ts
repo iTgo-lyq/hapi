@@ -256,6 +256,7 @@ function createWebApp(options: {
             workGraph: true,
             spawnReceipts: 1,
             mcpToolFilter: 1,
+            machineInventory: 1,
             execution: 1,
             titleSuggestion: readTitleProviderConfig() !== null
         }

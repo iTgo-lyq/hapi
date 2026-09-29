@@ -693,10 +693,25 @@ export type MachinePathsExistsRequest = z.infer<typeof MachinePathsExistsRequest
 export const AgentAvailabilityReasonSchema = z.enum(['not_found', 'invalid_configuration'])
 export type AgentAvailabilityReason = z.infer<typeof AgentAvailabilityReasonSchema>
 
+export const AgentAvailabilityRequestSchema = z.object({
+    details: z.boolean().optional()
+})
+export type AgentAvailabilityRequest = z.infer<typeof AgentAvailabilityRequestSchema>
+
+/** Native command inspection, separate from the Runner's existing preflight. */
+export const AgentAvailabilityDetailsSchema = z.object({
+    checkedAt: z.number().int().nonnegative(),
+    executable: z.string().nullable(),
+    version: z.string().nullable(),
+    versionStatus: z.enum(['detected', 'not_found', 'unrecognized', 'failed', 'timeout'])
+})
+export type AgentAvailabilityDetails = z.infer<typeof AgentAvailabilityDetailsSchema>
+
 export const AgentAvailabilityEntrySchema = z.object({
     agent: AgentFlavorSchema,
     available: z.boolean(),
-    reason: AgentAvailabilityReasonSchema.optional()
+    reason: AgentAvailabilityReasonSchema.optional(),
+    details: AgentAvailabilityDetailsSchema.optional()
 })
 export type AgentAvailabilityEntry = z.infer<typeof AgentAvailabilityEntrySchema>
 

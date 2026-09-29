@@ -153,13 +153,19 @@ and preserved filtering on resume.
 
 | Method & path | Request | Response |
 |---|---|---|
-| `GET /api/machines` | — | `{machines: Machine[]}` (online machines in the caller's namespace) |
+| `GET /api/machines` | `?includeOffline=true` optionally includes persisted offline identities | `{machines: Machine[]}` in the caller's namespace; online only by default. `health.capabilities.machineInventory: 1` advertises the full inventory option |
 | `PATCH /api/machines/:id` | `{displayName}` (trimmed; ≤ 64 chars; empty clears back to hostname) | `{ok: true}` |
-| `GET /api/machines/:id/agent-availability` | — | `{agents: {agent, available, reason?: 'not_found'\|'invalid_configuration'}[]}`; 409 `runner_upgrade_required` on old runners |
+| `GET /api/machines/:id/agent-availability` | Optional `?details=true` | `{agents: {agent, available, reason?: 'not_found'\|'invalid_configuration', details?}[]}`; 409 `runner_upgrade_required` on old runners |
 | `POST /api/machines/:id/spawn` | `{directory, agent?, model?, effort?, modelReasoningEffort?, yolo?, permissionMode?, sessionType?: 'simple'\|'worktree', worktreeName?, serviceTier?, collaborationMode?, copilotAgentMode?, startingMode?: 'remote'\|'pty'}` | `{type: 'success', sessionId}` \| `{type: 'error', message, code?, agent?}` (agy accepts only `remote`) |
 | `POST /api/machines/:id/list-directory` | `{path, includeHidden?}` | `{success, entries?: (DirectoryEntry & {isGitRepo?})[], error?}` |
 | `POST /api/machines/:id/paths/exists` | `{paths: string[]}` (≤ 1000) | `{exists: Record<string, boolean>, outsideWorkspaceRoots?: string[]}` |
 | `POST /api/machines/:id/restart-runner` | `{}` | `{message}`; errors carry `code: 'machine_not_found' \| 'machine_offline'` |
+
+Explicit availability details require `runnerState.capabilities.agentAvailabilityDetails: true`; an offline target returns 503 `machine_offline` before RPC. The optional capability does not enter the required Runner capability list. Ordinary availability remains a lightweight preflight and executes no native command.
+
+For Codex and Claude, `details` contains `{checkedAt, executable: string|null, version: string|null, versionStatus}`. Status is `detected`, `not_found`, `unrecognized`, `failed`, or `timeout`. `executable` is null when the actual launcher command cannot be resolved; a found command can still have an unknown version. Native `--version` probes run asynchronously in parallel with a 3-second per-command timeout and bounded output. Only parsed version facts are returned, not stdout/stderr or authentication data. This does not check model login, model configuration validity, or successful task execution.
+
+The raw `available/reason` fields retain the Runner's existing preflight semantics. In particular, legacy Codex preflight still checks `HAPI_CODEX_APP_SERVER_BIN`, while the current shared launcher resolves its command through `resolveCodexCommand`. Details inspect the latter, so a passing preflight can coexist with `details.versionStatus: 'not_found'`; callers must not report an installed native tool based on preflight alone. Claude details use the same `HAPI_CLAUDE_PATH`/default resolver as its launcher. Changing a shell's environment does not change an already running Runner's environment; restart that Runner to apply new PATH or overrides.
 
 Note the spawn response is discriminated on `type`, not HTTP status — a failed
 spawn is still HTTP 200. Stable spawn failure codes are

@@ -1,9 +1,11 @@
 import { existsSync, statSync } from 'node:fs'
+import { execFile } from 'node:child_process'
 import { isAbsolute } from 'node:path'
 import {
     CREATABLE_AGENT_FLAVORS,
     type AgentAvailabilityEntry,
     type AgentAvailabilityResponse,
+    type AgentAvailabilityDetails,
     type AgentFlavor,
 } from '@hapi/protocol'
 import { getDefaultClaudeCodePath } from '@/claude/sdk/utils'
@@ -111,6 +113,46 @@ export function getAgentAvailabilityResponse(
     return {
         agents: CREATABLE_AGENT_FLAVORS.map((agent) => getAgentAvailability(agent, env)),
     }
+}
+
+async function inspectNativeCommand(
+    agent: 'codex' | 'claude', env: LaunchEnvironment,
+): Promise<AgentAvailabilityDetails> {
+    const checkedAt = Date.now()
+    const missing: AgentAvailabilityDetails = { checkedAt, executable: null, version: null, versionStatus: 'not_found' }
+    let spec: AgentLaunchSpec
+    try {
+        // The shared Codex launcher uses resolveCodexCommand, not the legacy
+        // HAPI_CODEX_APP_SERVER_BIN preflight override. Report both facts honestly.
+        spec = agent === 'codex' ? resolveCodexCommand(env) : resolveLaunchSpec(agent, env, 'runner')
+    } catch { return missing }
+    if (!hasResolvableCommand(spec, env)) return missing
+    const executable = resolveExecutable(spec.command, { pathValue: env.PATH, pathExt: env.PATHEXT })
+    if (!executable) return missing
+    return new Promise(resolve => {
+        execFile(executable, [...spec.args, '--version'], {
+            env, encoding: 'utf8', timeout: 3_000, killSignal: 'SIGKILL', maxBuffer: 8_192, windowsHide: true,
+        }, (error, stdout) => {
+            if (error) {
+                resolve({ checkedAt, executable, version: null,
+                    versionStatus: error.killed && error.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 'timeout' : 'failed' })
+                return
+            }
+            const version = (agent === 'codex'
+                ? stdout.match(/\bcodex-cli (\d+\.\d+\.\d+(?:[-+][\w.-]+)?)/)
+                : stdout.match(/\b(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)\s+\(Claude Code\)/))?.[1] ?? null
+            resolve({ checkedAt, executable, version, versionStatus: version ? 'detected' : 'unrecognized' })
+        })
+    })
+}
+
+/** Explicit read-only details; default availability never executes a command. */
+export async function getAgentAvailabilityDetailsResponse(
+    env: LaunchEnvironment = process.env,
+): Promise<AgentAvailabilityResponse> {
+    const { agents } = getAgentAvailabilityResponse(env)
+    return { agents: await Promise.all(agents.map(async entry => entry.agent === 'codex' || entry.agent === 'claude'
+        ? { ...entry, details: await inspectNativeCommand(entry.agent, env) } : entry)) }
 }
 
 export function agentUnavailableMessage(entry: AgentAvailabilityEntry): string {

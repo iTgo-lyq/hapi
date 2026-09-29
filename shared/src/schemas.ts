@@ -500,6 +500,7 @@ export const RunnerStateSchema = z.object({
     capabilities: z.object({
         codexSharedRuntime: z.literal(true).optional(),
         mcpToolFilter: z.literal(true).optional(),
+        agentAvailabilityDetails: z.literal(true).optional(),
         piExistingSessionResume: z.literal(true).optional(),
         agentConfigs: z.array(AgentConfigDescriptorSchema).optional()
     }).optional(),

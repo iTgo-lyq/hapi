@@ -10,6 +10,7 @@ import { configuration } from '@/configuration'
 import type { ClientToServerEvents, ServerToClientEvents, Update, UpdateMachineBody } from '@hapi/protocol'
 import {
     ArchiveCodexSessionRpcRequestSchema,
+    AgentAvailabilityRequestSchema,
     ListCodexSessionsRpcRequestSchema,
     ListPiSessionsRpcRequestSchema,
     type ArchiveCodexSessionRpcResponse,
@@ -64,7 +65,7 @@ import { inspectCursorChatStore } from '@/cursor/cursorChatStoreStatus'
 import { homedir } from 'node:os'
 import type { CursorChatStoreStatus } from '@hapi/protocol/apiTypes'
 import { MachinePathPolicy } from './machinePathPolicy'
-import { getAgentAvailabilityResponse } from '@/agent/agentAvailability'
+import { getAgentAvailabilityResponse, getAgentAvailabilityDetailsResponse } from '@/agent/agentAvailability'
 
 export { normalizeWindowsDriveRoot } from './machinePathPolicy'
 
@@ -138,7 +139,8 @@ export class ApiMachineClient {
 
         this.rpcHandlerManager.registerHandler<unknown, AgentAvailabilityResponse>(
             RPC_METHODS.AgentAvailability,
-            async () => getAgentAvailabilityResponse()
+            async params => AgentAvailabilityRequestSchema.parse(params ?? {}).details
+                ? getAgentAvailabilityDetailsResponse() : getAgentAvailabilityResponse()
         )
 
         this.rpcHandlerManager.registerHandler<PathExistsRequest, PathExistsResponse>(RPC_METHODS.PathExists, async (params) => {

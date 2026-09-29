@@ -11,6 +11,7 @@ import {
 import type {
     AgyModelsResponse,
     AgentAvailabilityResponse,
+    AgentAvailabilityRequest,
     CodexModelSummary,
     CodexModelsResponse,
     CommandResponse,
@@ -341,8 +342,8 @@ export class RpcGateway {
         return result as RpcListDirectoryResponse
     }
 
-    async getAgentAvailability(machineId: string): Promise<AgentAvailabilityResponse> {
-        const result = await this.machineRpc(machineId, RPC_METHODS.AgentAvailability, {})
+    async getAgentAvailability(machineId: string, options: AgentAvailabilityRequest = {}): Promise<AgentAvailabilityResponse> {
+        const result = await this.machineRpc(machineId, RPC_METHODS.AgentAvailability, options)
         return AgentAvailabilityResponseSchema.parse(result)
     }
 

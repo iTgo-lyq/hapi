@@ -24,7 +24,8 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
 
         const namespace = c.get('namespace')
-        const machines = engine.getOnlineMachinesByNamespace(namespace)
+        const machines = c.req.query('includeOffline') === 'true'
+            ? engine.getMachinesByNamespace(namespace) : engine.getOnlineMachinesByNamespace(namespace)
         return c.json({ machines })
     })
 
@@ -161,8 +162,15 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             }, 409)
         }
 
+        const details = c.req.query('details') === 'true'
+        if (details && !machine.active) {
+            return c.json({ error: 'Machine is offline', code: 'machine_offline' }, 503)
+        }
+        if (details && !machine.runnerState?.capabilities?.agentAvailabilityDetails) {
+            return c.json({ error: 'Upgrade the runner to inspect native tool details', code: 'runner_upgrade_required' }, 409)
+        }
         try {
-            return c.json(await engine.getAgentAvailability(machineId))
+            return c.json(await engine.getAgentAvailability(machineId, details ? { details: true } : {}))
         } catch (error) {
             return c.json({
                 error: error instanceof Error ? error.message : 'Failed to inspect Agent availability',

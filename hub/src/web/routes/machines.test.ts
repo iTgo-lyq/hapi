@@ -29,6 +29,45 @@ function createMachine(overrides?: Partial<Machine>): Machine {
 }
 
 describe('machines routes', () => {
+    it('includes offline machines only when requested and always uses the caller namespace', async () => {
+        const live = createMachine({ namespace: 'private' })
+        const offline = createMachine({ id: 'offline', namespace: 'private', active: false })
+        const engine = {
+            getOnlineMachinesByNamespace: (namespace: string) => { expect(namespace).toBe('private'); return [live] },
+            getMachinesByNamespace: (namespace: string) => { expect(namespace).toBe('private'); return [live, offline] },
+        } as Partial<SyncEngine>
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => { c.set('namespace', 'private'); await next() })
+        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
+        expect(await (await app.request('/api/machines')).json()).toEqual({ machines: [live] })
+        expect(await (await app.request('/api/machines?includeOffline=true')).json()).toEqual({ machines: [live, offline] })
+    })
+
+    it('forwards explicit details only to a capable online Runner in the caller namespace', async () => {
+        const machine = createMachine()
+        const calls: unknown[] = []
+        const details = { checkedAt: 1, executable: '/bin/codex', version: '0.160.0', versionStatus: 'detected' as const }
+        const result = { agents: [{ agent: 'codex' as const, available: true, details }] }
+        const engine = {
+            getMachine: () => machine,
+            getAgentAvailability: async (id: string, options?: unknown) => { calls.push({ id, options }); return result },
+        } as Partial<SyncEngine>
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
+        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
+        const endpoint = '/api/machines/machine-1/agent-availability?details=true'
+        expect((await app.request(endpoint)).status).toBe(409)
+        expect(calls).toEqual([])
+        machine.runnerState = { status: 'running', capabilities: { agentAvailabilityDetails: true } }
+        expect(await (await app.request(endpoint)).json()).toEqual(result)
+        expect(calls).toEqual([{ id: machine.id, options: { details: true } }])
+        machine.active = false
+        expect((await app.request(endpoint)).status).toBe(503)
+        machine.namespace = 'someone-else'
+        expect((await app.request(endpoint)).status).toBe(403)
+        expect(calls).toHaveLength(1)
+    })
+
     it('blocks spawn and availability inspection when the runner needs an upgrade', async () => {
         const machine = createMachine({
             metadata: {

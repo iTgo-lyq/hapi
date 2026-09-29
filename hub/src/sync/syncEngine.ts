@@ -4295,8 +4295,8 @@ export class SyncEngine {
         return await this.rpcGateway.checkPathsExist(machineId, paths)
     }
 
-    async getAgentAvailability(machineId: string): ReturnType<RpcGateway['getAgentAvailability']> {
-        return await this.rpcGateway.getAgentAvailability(machineId)
+    async getAgentAvailability(machineId: string, options: Parameters<RpcGateway['getAgentAvailability']>[1] = {}): ReturnType<RpcGateway['getAgentAvailability']> {
+        return await this.rpcGateway.getAgentAvailability(machineId, options)
     }
 
     async listMachineDirectory(machineId: string, path: string, includeHidden?: boolean): Promise<RpcListDirectoryResponse> {

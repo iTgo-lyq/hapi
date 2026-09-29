@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { compress } from 'hono/compress'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
+import { bodyLimit } from 'hono/body-limit'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { serveStatic } from 'hono/bun'
@@ -43,6 +44,9 @@ import type { WebSocketData } from '@socket.io/bun-engine'
 import { loadEmbeddedAssetMap, type EmbeddedWebAsset } from './embeddedAssets'
 import { isBunCompiled } from '../utils/bunCompiled'
 import type { Store } from '../store'
+import { ArtifactService } from '../artifacts/service'
+import { loadArtifactLimits } from '../config/artifactLimits'
+import { createArtifactRoutes } from './routes/artifacts'
 
 // Normalise upstream close codes before forwarding to the browser client.
 // Codes 1005/1006/1015 are reserved and cannot be sent in a close frame;
@@ -234,6 +238,12 @@ function createWebApp(options: {
     app.use('*', logger())
 
     const configuration = getConfiguration()
+    const artifacts = new ArtifactService(options.store.artifacts, join(configuration.dataDir, 'artifacts'), loadArtifactLimits())
+    const ordinaryBodyLimit = bodyLimit({ maxSize: 68 * 1024 * 1024 })
+    app.use('*', async (c, next) => {
+        if (!/^\/(api|cli)\//.test(c.req.path) || (c.req.method === 'PUT' && /^\/(api|cli)\/artifacts\/[^/]+\/content$/.test(c.req.path))) return next()
+        return ordinaryBodyLimit(c, next)
+    })
     const corsOrigins = options.corsOrigins ?? configuration.corsOrigins
     const corsOriginOption = corsOrigins.includes('*') ? '*' : corsOrigins
     const corsMiddleware = cors({
@@ -257,6 +267,7 @@ function createWebApp(options: {
             spawnReceipts: 1,
             mcpToolFilter: 1,
             machineInventory: 1,
+            artifacts: 1,
             execution: 1,
             titleSuggestion: readTitleProviderConfig() !== null
         }
@@ -283,12 +294,13 @@ function createWebApp(options: {
         return next()
     })
 
-    app.route('/cli', createCliRoutes(options.getSyncEngine))
+    app.route('/cli', createCliRoutes(options.getSyncEngine, artifacts))
 
     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
     app.route('/api', createBindRoutes(options.jwtSecret, options.store))
 
     app.use('/api/*', createAuthMiddleware(options.jwtSecret))
+    app.route('/api', createArtifactRoutes(artifacts))
     app.route('/api', createEventsRoutes(options.getSseManager, options.getSyncEngine, options.getVisibilityTracker))
     app.route('/api', createSessionsRoutes(options.getSyncEngine))
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
@@ -455,8 +467,8 @@ export async function startWebServer(options: {
     const server = (Bun.serve as any)({
         hostname: configuration.listenHost,
         port: configuration.listenPort,
-        idleTimeout: Math.max(30, socketHandler.idleTimeout),
-        maxRequestBodySize: Math.max(socketHandler.maxRequestBodySize, 68 * 1024 * 1024),
+        idleTimeout: Math.max(60, socketHandler.idleTimeout),
+        maxRequestBodySize: Math.max(socketHandler.maxRequestBodySize, 68 * 1024 * 1024, loadArtifactLimits().maxFileBytes),
         websocket: {
             ...originalWsHandler,
             // Advertise permessage-deflate. Negotiation alone compresses

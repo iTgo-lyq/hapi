@@ -14,6 +14,7 @@ import { UserStore } from './userStore'
 import { UsageStore } from './usageStore'
 import { WorkGraphStore } from './workGraphStore'
 import { SpawnReceiptStore } from './spawnReceiptStore'
+import { ArtifactStore } from './artifactStore'
 
 export type {
     NativeDevicePlatform,
@@ -43,7 +44,7 @@ export {
     WorkGraphValidationError
 } from './workGraph'
 
-const SCHEMA_VERSION: number = 27
+const SCHEMA_VERSION: number = 28
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -57,7 +58,9 @@ const REQUIRED_TABLES = [
     'usage_scan_state',
     'events',
     'event_links',
-    'spawn_receipts'
+    'spawn_receipts',
+    'artifacts',
+    'artifact_references'
 ] as const
 
 export class Store {
@@ -75,6 +78,7 @@ export class Store {
     readonly usage: UsageStore
     readonly workGraph: WorkGraphStore
     readonly spawnReceipts: SpawnReceiptStore
+    readonly artifacts: ArtifactStore
 
     /**
      * Filesystem path of the underlying SQLite database, or ':memory:' for
@@ -130,6 +134,7 @@ export class Store {
         this.usage = new UsageStore(this.db)
         this.workGraph = new WorkGraphStore(this.db)
         this.spawnReceipts = new SpawnReceiptStore(this.db)
+        this.artifacts = new ArtifactStore(this.db)
     }
 
     /**
@@ -353,6 +358,7 @@ export class Store {
             24: () => this.migrateFromV24ToV25(),
             25: () => this.migrateFromV25ToV26(),
             26: () => this.migrateFromV26ToV27(),
+            27: () => this.migrateFromV27ToV28(),
         })
 
         if (currentVersion === 0) {
@@ -605,6 +611,22 @@ export class Store {
                 ON event_links(namespace, to_event_id);
         `)
         this.migrateFromV26ToV27()
+        this.migrateFromV27ToV28()
+    }
+
+    private migrateFromV27ToV28(): void {
+        this.db.exec(`CREATE TABLE IF NOT EXISTS artifacts (
+            id TEXT PRIMARY KEY, namespace TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+            filename TEXT NOT NULL, mime_type TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL,
+            state TEXT NOT NULL, created_at INTEGER NOT NULL, published_at INTEGER, deleted_at INTEGER, error TEXT,
+            UNIQUE(namespace,request_id), UNIQUE(namespace,id)
+        );
+        CREATE INDEX IF NOT EXISTS artifact_namespace_created ON artifacts(namespace,created_at,id);
+        CREATE TABLE IF NOT EXISTS artifact_references (
+            namespace TEXT NOT NULL, artifact_id TEXT NOT NULL, reference TEXT NOT NULL, purpose TEXT NOT NULL,
+            created_at INTEGER NOT NULL, PRIMARY KEY(namespace,artifact_id,reference),
+            FOREIGN KEY(namespace,artifact_id) REFERENCES artifacts(namespace,id)
+        );`)
     }
 
     private migrateFromV26ToV27(): void {

@@ -150,6 +150,12 @@ for request/response shapes and error semantics, and `src/web/routes/` for all e
 
 - `GET /api/storage/sqlite` - SQLite database/WAL/SHM sizes for the owner namespace.
 
+### Persistent files
+
+Namespace-scoped, session-independent file upload, download, references, and
+deletion are available under `/api/artifacts` and `/cli/artifacts` with their
+existing authentication. See the [persistent file contract](../docs/api/artifacts.md).
+
 ### Git/Files (`src/web/routes/git.ts`)
 
 - `GET /api/sessions/:id/git-status` - Git status.

@@ -13,6 +13,8 @@ import { constantTimeEquals } from '../../utils/crypto'
 import { parseAccessToken } from '../../utils/accessToken'
 import type { Machine, Session, SyncEngine } from '../../sync/syncEngine'
 import { SessionIdentityConflictError, SessionNotAdoptableError } from '../../store/sessions'
+import type { ArtifactService } from '../../artifacts/service'
+import { createArtifactRoutes } from './artifacts'
 
 const bearerSchema = z.string().regex(/^Bearer\s+(.+)$/i)
 
@@ -65,7 +67,7 @@ function clearErrorStatus(code: string): 403 | 404 | 409 | 500 {
                 : 500
 }
 
-export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<CliEnv> {
+export function createCliRoutes(getSyncEngine: () => SyncEngine | null, artifacts?: ArtifactService): Hono<CliEnv> {
     const app = new Hono<CliEnv>()
 
     app.use('*', async (c, next) => {
@@ -91,6 +93,8 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
         c.set('namespace', parsedToken.namespace)
         return await next()
     })
+
+    if (artifacts) app.route('/', createArtifactRoutes(artifacts))
 
     app.post('/sessions', async (c) => {
         const engine = getSyncEngine()

@@ -609,6 +609,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     const repositories = new RepositoryManager({
       cache: snapshots, withRepositoryLock: (key, action) => workspaces.withRepositoryLock(key, action),
       repositoryWorkspaces: commonDir => workspaces.repositoryRecords(commonDir),
+      resolveRepository: (cwd, options) => workspaces.resolveRepository(cwd, options),
       withSealedResult: (environmentId, roundId, options, capture) => workspaces.withSealedResult(environmentId, roundId, options, capture),
       home: configuration.happyHomeDir, pathPolicy: new MachinePathPolicy({ workspaceRoots }),
       resolveSource: (cwd, baseRef, options, readDirty) => workspaces.resolveSource(cwd, baseRef, options, readDirty),

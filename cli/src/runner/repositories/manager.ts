@@ -9,6 +9,7 @@ import { exportRepository, repositoryReadEnvironment } from './export'
 import type { RepositoryCache } from './cache'
 import type { WorkspaceManager } from '../workspaces/manager'
 import { verifyRepositorySnapshot } from './verify'
+import { fetchRepositoryResult } from './fetch'
 
 const fail = (code: string, message: string, hint?: string): never => { throw new WorkspaceError(code, message, hint) }
 /** Durable machine repository receipts; artifacts owns their network delivery. */
@@ -21,13 +22,15 @@ export class RepositoryManager {
         resolveSource: (cwd: string, baseRef: string, options?: GitOptions, readDirty?: boolean) => Promise<WorkspaceSource>; gitTimeoutMs?: number; cache?: RepositoryCache;
         repositoryWorkspaces?: (commonDir: string) => ManagedWorkspace[];
         withSealedResult?: WorkspaceManager['withSealedResult'];
+        resolveRepository?: WorkspaceManager['resolveRepository'];
         withRepositoryLock?: <T>(key: string, action: () => Promise<T>) => Promise<T> }) {
         mkdirSync(options.home, { recursive: true, mode: 0o700 })
         this.root = join(realpathSync(options.home), 'workspaces', 'exports')
     }
     private directory(id: string, action?: RepositoryOperation['request']['action']) {
         if (!/^[a-f0-9-]{36}$/i.test(id)) return fail('repository_id_invalid', 'Invalid repository operation ID.')
-        const imported = join(this.root, '..', 'imports', id)
+        const imported = join(this.root, '..', 'imports', id), fetched = join(this.root, '..', 'fetches', id)
+        if (action === 'fetch-result' || !action && existsSync(join(fetched, 'operation.json'))) return fetched
         return action === 'import' || !action && existsSync(join(imported, 'operation.json')) ? imported : join(this.root, id)
     }
     private read(id: string): RepositoryOperation {
@@ -87,6 +90,10 @@ export class RepositoryManager {
                 if (!this.options.cache || !this.options.withRepositoryLock) return fail('repository_import_unavailable', 'Runner repository import is not configured.')
                 record.imported = await this.options.cache.import(record.request, join(this.directory(record.request.operationId, 'import'), 'data'), gitOptions, this.options.withRepositoryLock)
                 record.snapshot = record.request.snapshot
+            } else if (record.request.action === 'fetch-result') {
+                if (!this.options.resolveRepository || !this.options.withRepositoryLock) return fail('repository_results_unavailable', 'Runner result fetch is not configured.')
+                record.fetched = await fetchRepositoryResult(record.request, join(this.directory(record.request.operationId, 'fetch-result'), 'data'), {
+                    pathPolicy: this.options.pathPolicy, gitOptions, resolveRepository: this.options.resolveRepository, lock: this.options.withRepositoryLock })
             } else if (record.request.action === 'export-result') {
                 if (!this.options.withSealedResult) return fail('repository_results_unavailable', 'Runner result export is not configured.')
                 const request = record.request, data = join(this.directory(request.operationId), 'data')
@@ -126,7 +133,7 @@ export class RepositoryManager {
             if (record.process && !gitProcessStopped(record.process)) {
                 record.status = 'unknown'; record.error = { code: 'repository_process_unknown', message: 'The previous Git subprocess group has not been confirmed stopped.' }
             } else {
-                const complete = record.request.action === 'import' ? record.imported
+                const complete = record.request.action === 'fetch-result' ? record.fetched : record.request.action === 'import' ? record.imported
                     : record.request.action === 'export-result' ? record.snapshot && record.sealed : record.snapshot
                 record.process = undefined; record.status = complete ? 'succeeded' : 'failed'
                 record.error = record.status === 'succeeded' ? undefined : { code: `repository_${record.request.action}_interrupted`, message: 'Repository operation stopped without a complete receipt.', hint: 'Inspect the source and create a new request using the original fixed commit; this operation will not rerun.' }
@@ -138,6 +145,12 @@ export class RepositoryManager {
     private async release(request: Extract<RepositoryRequest, { action: 'release' }>) {
         const record = this.inspect(request.operationId)
         if (this.jobs.has(request.operationId) || !['succeeded', 'failed'].includes(record.status)) return fail('repository_operation_pending', 'Wait for export to stop before releasing its candidates.')
+        if (record.request.action === 'fetch-result') {
+            if (request.names) return fail('repository_release_names_invalid', 'A result fetch must release its verification copies as a whole.')
+            record.retention = 'releasing'; record.updatedAt = Date.now(); this.save(record)
+            await rm(join(this.directory(request.operationId, 'fetch-result'), 'data'), { recursive: true, force: true })
+            record.retention = 'released'; record.updatedAt = Date.now(); this.save(record); return record
+        }
         if (record.request.action === 'import') {
             if (request.names) return fail('repository_release_names_invalid', 'An import must be released as a whole.')
             if (!this.options.cache || !this.options.withRepositoryLock || !this.options.repositoryWorkspaces) return fail('repository_release_unavailable', 'Runner cache retention checks are unavailable.')

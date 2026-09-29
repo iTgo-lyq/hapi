@@ -115,7 +115,7 @@ export class WorkspaceManager {
                 operation.process = child; operation.startedGit = true; operation.updatedAt = Date.now(); this.save(workspace)
             } } : {}) }
     }
-    async resolveSource(cwd: string, baseRef: string, options: GitOptions = {}, readDirty = true): Promise<WorkspaceSource> {
+    async resolveRepository(cwd: string, options: GitOptions = {}): Promise<Omit<WorkspaceSource, 'baseRef' | 'baseCommit' | 'dirty'>> {
         await this.allowed(cwd)
         const sourcePath = realpathSync(cwd)
         if (!statSync(sourcePath).isDirectory()) return problem('workspace_not_directory', 'The source must be an existing directory.')
@@ -123,17 +123,22 @@ export class WorkspaceManager {
         const commonDir = realpathSync(await output(sourcePath, ['rev-parse', '--path-format=absolute', '--git-common-dir'], options))
         const objectFormat = await output(sourcePath, ['rev-parse', '--show-object-format'], options)
         if (!['sha1', 'sha256'].includes(objectFormat)) return problem('git_object_format_unsupported', 'Unsupported Git object format.')
+        const relativePath = relative(repositoryRoot, sourcePath).split(sep).join('/')
+        if (!inside(repositoryRoot, sourcePath)) return problem('workspace_cwd_outside_repository', 'Source cwd is outside its repository.')
+        return { machineId: this.options.machineId, repositoryId: digest(JSON.stringify([this.options.machineId, commonDir, objectFormat])),
+            sourcePath, repositoryRoot, commonDir, relativePath, objectFormat: objectFormat as 'sha1' | 'sha256' }
+    }
+    async resolveSource(cwd: string, baseRef: string, options: GitOptions = {}, readDirty = true): Promise<WorkspaceSource> {
+        const identity = await this.resolveRepository(cwd, options)
+        const { sourcePath, repositoryRoot, relativePath } = identity
         const parsed = await git(sourcePath, ['-c', 'core.warnAmbiguousRefs=true', 'rev-parse', '--verify', '--end-of-options', `${baseRef}^{commit}`], options)
         if (/ambiguous/i.test(parsed.stderr)) return problem('git_ref_ambiguous', 'Git reference is ambiguous; use a full ref or commit SHA.')
         const baseCommit = parsed.stdout.trim()
-        const relativePath = relative(repositoryRoot, sourcePath).split(sep).join('/')
-        if (!inside(repositoryRoot, sourcePath)) return problem('workspace_cwd_outside_repository', 'Source cwd is outside its repository.')
         if (relativePath && await output(repositoryRoot, ['cat-file', '-t', `${baseCommit}:${relativePath}`], options) !== 'tree') {
             return problem('workspace_cwd_missing', 'Source subdirectory is not a directory in the selected commit.')
         }
         const dirty = readDirty && !!await output(sourcePath, ['status', '--porcelain=v1', '--untracked-files=normal', '--ignore-submodules=none'], options)
-        return { machineId: this.options.machineId, repositoryId: digest(JSON.stringify([this.options.machineId, commonDir, objectFormat])),
-            sourcePath, repositoryRoot, commonDir, relativePath, baseRef, baseCommit, objectFormat: objectFormat as 'sha1' | 'sha256', dirty }
+        return { ...identity, baseRef, baseCommit, dirty }
     }
     async request(raw: unknown): Promise<WorkspaceResponse> {
         if (this.shutdown.signal.aborted) return problem('workspace_runner_stopping', 'Runner is stopping; inspect the saved operation after reconnecting.')

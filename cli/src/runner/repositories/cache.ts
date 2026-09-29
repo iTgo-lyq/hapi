@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { mkdir, rename, rm } from 'node:fs/promises'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { type ManagedWorkspace, type RepositoryImport, type RepositoryImportRequest, type RepositoryOperation,
     type RepositorySnapshot, type WorkspaceSource } from '@hapi/protocol'
@@ -9,7 +9,7 @@ import type { MachinePathPolicy } from '@/api/machinePathPolicy'
 import { captureFile } from '../artifacts/outputs'
 import { git, output, type GitOptions } from '../workspaces/git'
 import { fail, lfsFiles, logical } from './assets'
-import { validateRepositoryManifest, validateRepositoryTree, verifyRepositorySnapshot } from './verify'
+import { stageRepositorySnapshot, validateRepositoryManifest, validateRepositoryTree, verifyRepositorySnapshot } from './verify'
 import { repositoryReadEnvironment } from './export'
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -43,16 +43,8 @@ export class RepositoryCache {
     async import(request: RepositoryImportRequest, data: string, options: GitOptions,
         lock: <T>(key: string, action: () => Promise<T>) => Promise<T>): Promise<RepositoryImport> {
         const snapshot = request.snapshot; validateRepositoryManifest(snapshot)
-        const files = new Map(request.files.map(file => [file.name, file.path]))
-        if (files.size !== request.files.length || files.size !== snapshot.files.length || snapshot.files.some(file => !files.has(file.name))) return fail('repository_manifest_invalid', 'Import files must exactly match the manifest.')
         const opts = { ...options, env: { ...options.env, ...repositoryReadEnvironment, GIT_LFS_SKIP_SMUDGE: '1' } }
-        await mkdir(join(data, 'files'), { recursive: true, mode: 0o700 })
-        for (const file of snapshot.files) {
-            const path = files.get(file.name)!
-            if (!isAbsolute(path) || !await this.options.pathPolicy.allowsBrowse(path)) return fail('outside_workspace_roots', 'Import files require allowed absolute paths.')
-            const fixed = await captureFile(dirname(path), { name: file.name, relativePath: path.slice(dirname(path).length + 1) }, join(data, 'files', file.name), options.signal ?? new AbortController().signal)
-            if (fixed.size !== file.size || fixed.sha256 !== file.sha256) return fail('repository_file_mismatch', 'Downloaded file does not match the manifest.', file.name)
-        }
+        await stageRepositorySnapshot(request, data, this.options.pathPolicy, opts)
         await verifyRepositorySnapshot(snapshot, data, opts)
         return lock(this.commonDir(snapshot), async () => {
             const location = this.location(snapshot), owner = { scope: hash(this.options.scope), sourceMachineId: snapshot.sourceMachineId, repositoryId: snapshot.repositoryId }

@@ -29,8 +29,10 @@ export type WorkspaceMutation = Exclude<WorkspaceRequest, { action: 'resolve' | 
 export type WorkspaceProblem = { code: string; message: string; hint?: string }
 export type WorkspacePreparation = PreparedWorkspace & { roundId: string; cwd: string; startHead: string;
     inputs: Array<{ name: string; path: string; sha256: string; size: number }>; readyAt: number; sessionId?: string }
-export type WorkspaceResult = { environmentId: string; roundId: string; baseCommit: string; startHead: string;
-    resultHead: string; resultRef: string; checkpoint?: string; partial: boolean; fileCount: number; paths: string[]; sealedAt: number }
+export const WorkspaceResultSchema = z.strictObject({ environmentId: id, roundId: id, baseCommit: sha, startHead: sha,
+    resultHead: sha, resultRef: z.string().startsWith('refs/hapi/workspaces/'), checkpoint: sha.optional(), partial: z.boolean(),
+    fileCount: z.number().int().nonnegative(), paths: z.array(z.string()).max(100), sealedAt: z.number().int().nonnegative() })
+export type WorkspaceResult = z.infer<typeof WorkspaceResultSchema>
 export type WorkspaceOperation = { id: string; request: WorkspaceMutation;
     status: 'accepted' | 'running' | 'succeeded' | 'failed' | 'unknown'; createdAt: number; updatedAt: number;
     error?: WorkspaceProblem; expectedHead?: string; checkpoint?: string;

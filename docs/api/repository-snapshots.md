@@ -1,16 +1,17 @@
 # Repository baselines, sealed results and caches
 
-`POST /api/machines/:id/repositories` uses the existing client JWT, machine namespace and Runner RPC. An online Runner advertising `repositoryExport: 1` can export a fixed baseline; `repositoryImport: 1` adds independently verified target caches. `repositoryResults: 1` adds sealed result export. These operations do not start native sessions.
+`POST /api/machines/:id/repositories` uses the existing client JWT, machine namespace and Runner RPC. An online Runner advertising `repositoryExport: 1` can export a fixed baseline; `repositoryImport: 1` adds independently verified target caches. `repositoryResults: 1` adds sealed result export and fetch into the original repository. These operations do not start native sessions.
 
 ## Operations
 
 - `export`: `{ action, operationId, source }`, where `source` is the fixed `WorkspaceSource` returned by the managed-workspace resolve operation. The source commit is required; export never resolves a moving branch again.
 - `export-result`: `{ action, operationId, environmentId, roundId }` selects a result sealed by this Runner. Callers cannot supply or replace the result facts. Success includes `sealed: { source, result, verifiedAt }` and a complete independently verified snapshot.
 - `import`: `{ action, operationId, snapshot, files: [{ name, path }] }`. Files must exactly match the snapshot and be present at allowed absolute paths, normally returned by artifact materialization. Success returns `imported.source` and the owned root/submodule cache mapping.
+- `fetch-result`: `{ action, operationId, target: { machineId, repositoryId, commonDir, objectFormat, cwd }, result, baseline, output }`. `result` is the sealed WorkspaceResult; each material is `{ snapshot, files: [{ name, path }] }`. Success returns `fetched` with target, ref/head, restored repository/LFS paths and timestamp.
 - `inspect`: `{ action, operationId }` returns the original operation, immutable snapshot and any error.
-- `release`: `{ action, operationId, names? }` removes stopped export candidates or releases an import's cache holding. Names select exported files; import release requires omission. The receipt and snapshot remain queryable.
+- `release`: `{ action, operationId, names? }` removes stopped export candidates or releases an import's cache holding or a fetch's owned verification copies. Names select exported files; import/fetch release requires omission. The receipt and snapshot remain queryable.
 
-Export, result export and import return persisted `accepted` receipts and run in the background. Inspect reports `accepted`, `running`, `succeeded`, `failed` or `unknown`. Repeating the same ID and arguments returns the original receipt; different arguments conflict. A restarted Runner reconciles the saved Git process. Incomplete, stopped operations become explicit failures and are not automatically rerun. Use a new operation with the original snapshot after repairing the error. Inspecting a successful import also checks its source ownership and retained refs.
+Export, result export/fetch and import return persisted `accepted` receipts and run in the background. Inspect reports `accepted`, `running`, `succeeded`, `failed` or `unknown`. Repeating the same ID and arguments returns the original receipt; different arguments conflict. A restarted Runner reconciles the saved Git process. Incomplete, stopped operations become explicit failures and are not automatically rerun. Use a new operation with the original snapshot after repairing the error. Inspecting a successful import also checks its source ownership and retained refs.
 
 ## Content and ownership
 
@@ -31,6 +32,18 @@ Result export holds the managed repository lock used by prepare/remove/launch un
 Capture reads the selected sealed commit from the checkout root, so deletion of the original task subdirectory does not lose the result. It reuses full root/recursive module/LFS export, then the same independent empty-store verifier as import. The verified Git history must contain base → start → result ancestry. Only then are `snapshot` and `sealed` persisted together. Scratch alternates and verification repositories are removed; candidate files remain for artifact delivery. No-change and partial results preserve their original facts. Changed or dirty submodules retain the existing workspace-finalize rejection policy.
 
 Once successful, repeating the original operation or inspecting after Runner restart returns the same snapshot without reading the checkout again. Later rounds cannot change its files. An interrupted capture with no complete receipt fails after Git stop is proven; explicit new attempts still select the original sealed round. Release uses the existing partial/whole export cleanup, leaving workspace refs, commits, checkout and receipt untouched. Independent verification establishes machine candidates, not center delivery or business acceptance. Consumers must retain the initial baseline's LFS entities separately when those differ from the result tree.
+
+## Fetch into the original repository
+
+Fetch requires the original machine, canonical Git common directory, repository identity and object format. The current cwd may be a different linked worktree of that same repository. Identity resolution does not read or require the original branch, HEAD commit or baseline objects; a URL-equivalent clone is a different target. Both input baseline and output recovery material are fixed and verified in independent empty stores before any target objects are appended. Baseline provenance, exact result head, unchanged recursive module mapping, base/start/result ancestry and changed path summary must match.
+
+Operation data stays in `HAPI_HOME/workspaces/fetches/<operationId>/data`. Verification does not borrow existing target objects. Under the shared repository lock, fetch rechecks the actual target and appends complete Git objects and both baseline/output LFS entities. Module stores follow native `modules/<name>` nesting, with initialized checkout mappings, existing commonDir/format/core.worktree checked. Existing Git configuration and HEADs are preserved. Newly created module databases receive core.bare=false and, if needed, local LFS filters with no hooks; later explicit native initialization can use these stores offline.
+
+All fetch Git commands use an owned empty hooks directory, disable submodule recursion, automatic GC/maintenance and commitGraph writes, and allow only the local file transport needed to read owned bundles. Fetch disables tags/pruning, writes no FETCH_HEAD and supplies no branch destination refspec. LFS bytes are copied directly to configured object storage; there is no lfs fetch/pull or project script execution. The parent's branch/HEAD, index, worktree, existing refs and configuration remain unchanged.
+
+Module result refs become reachable first. Only after all assets succeed is `refs/hapi/results/<environmentId>/<roundId>` published in the root by compare-and-set. Callers cannot select an arbitrary destination ref. The same ref/head is idempotent; a conflicting head is retained and rejected. A failure can leave appended objects, never a success receipt claiming a partial recovery; repair and explicitly retry using a new operation ID and the same frozen result. Interrupted operations are inspected under their original identity and are not automatically rerun.
+
+The response describes completed object recovery, not a merge or checkout. Parent agents can inspect the dedicated ref and explicitly merge/cherry-pick or initialize modules. Release removes only this fetch's owned material/verification copies, retaining the receipt and all original-repository objects/refs. Existing native/global LFS configuration is not rewritten; filters are initialized only for newly created module stores.
 
 ## Target import and managed workspaces
 

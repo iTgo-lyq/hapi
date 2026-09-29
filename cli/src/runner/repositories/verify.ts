@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { isDeepStrictEqual as same } from 'node:util'
-import { RepositorySnapshotSchema, type RepositorySnapshot } from '@hapi/protocol'
+import { RepositorySnapshotSchema, type RepositorySnapshot, type RepositoryMaterial } from '@hapi/protocol'
+import type { MachinePathPolicy } from '@/api/machinePathPolicy'
+import { captureFile } from '../artifacts/outputs'
 import { git, output, type GitOptions } from '../workspaces/git'
 import { fail, lfsFiles, modules } from './assets'
 import { repositoryReadEnvironment } from './export'
@@ -64,4 +66,19 @@ export async function verifyRepositorySnapshot(snapshot: RepositorySnapshot, dat
         if (!same(actual, expected)) return fail('repository_lfs_mismatch', 'Committed LFS pointers differ from the manifest.', repo.path)
     }
     return join(data, 'verify', '0')
+}
+
+/** Freeze downloaded bytes under one operation before checking or appending any Git objects. */
+export async function stageRepositorySnapshot(request: RepositoryMaterial, data: string, pathPolicy: MachinePathPolicy, options: GitOptions) {
+    const snapshot = request.snapshot
+    validateRepositoryManifest(snapshot)
+    const files = new Map(request.files.map(file => [file.name, file.path]))
+    if (files.size !== request.files.length || files.size !== snapshot.files.length || snapshot.files.some(file => !files.has(file.name))) return fail('repository_manifest_invalid', 'Import files must exactly match the manifest.')
+    await mkdir(join(data, 'files'), { recursive: true, mode: 0o700 })
+    for (const file of snapshot.files) {
+        const path = files.get(file.name)!
+        if (!isAbsolute(path) || !await pathPolicy.allowsBrowse(path)) return fail('outside_workspace_roots', 'Import files require allowed absolute paths.')
+        const fixed = await captureFile(dirname(path), { name: file.name, relativePath: path.slice(dirname(path).length + 1) }, join(data, 'files', file.name), options.signal ?? new AbortController().signal)
+        if (fixed.size !== file.size || fixed.sha256 !== file.sha256) return fail('repository_file_mismatch', 'Downloaded file does not match the manifest.', file.name)
+    }
 }

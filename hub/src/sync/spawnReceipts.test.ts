@@ -396,3 +396,26 @@ it('gates sealed result exports separately and validates their public ownership 
     expect(await (await post('machine', request)).json()).toMatchObject({ code: 'probe' })
     expect(calls).toEqual([['machine', request]])
 })
+
+
+it('gates original-repository result fetch and forbids arbitrary destination refs', async () => {
+    const { engine, gateway } = setup(), calls: unknown[] = []
+    engine.getOrCreateMachine('baseline-only', { host: 'host', platform: 'linux', happyCliVersion: 'old' },
+        { status: 'running', capabilities: { repositoryExport: 1, repositoryImport: 1 } }, 'default')
+    engine.handleMachineAlive({ machineId: 'baseline-only', time: Date.now() })
+    gateway.repositoryOperation = async (machineId, request) => { calls.push([machineId, request]); return { error: { code: 'probe', message: 'reached runner' } } }
+    const app = new Hono<WebAppEnv>(); app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() }); app.route('/api', createMachinesRoutes(() => engine))
+    const environmentId = crypto.randomUUID(), roundId = crypto.randomUUID(), head = 'a'.repeat(40)
+    const material = { snapshot: { version: 1, manifestId: crypto.randomUUID(), sourceMachineId: 'machine', repositoryId: 'origin', baseCommit: head, objectFormat: 'sha1',
+        repositories: [{ path: '', commit: head, objectFormat: 'sha1', bundleRef: 'refs/heads/snapshot', file: 'root.bundle' }], lfs: [],
+        files: [{ name: 'root.bundle', kind: 'bundle', sha256: 'b'.repeat(64), size: 100 }] }, files: [{ name: 'root.bundle', path: '/inputs/root.bundle' }] }
+    const request = { action: 'fetch-result', operationId: crypto.randomUUID(), target: { machineId: 'machine', repositoryId: 'origin', commonDir: '/repo/.git', objectFormat: 'sha1', cwd: '/repo' },
+        result: { environmentId, roundId, baseCommit: head, startHead: head, resultHead: head, resultRef: `refs/hapi/workspaces/${environmentId}/rounds/${roundId}`,
+            partial: false, fileCount: 0, paths: [], sealedAt: 1 }, baseline: material, output: material }
+    const post = (machine: string, body: unknown) => app.request(`/api/machines/${machine}/repositories`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    expect(await (await post('baseline-only', request)).json()).toMatchObject({ code: 'runner_upgrade_required' })
+    expect((await post('foreign', request)).status).toBe(403)
+    expect((await post('machine', { ...request, ref: 'refs/heads/main' })).status).toBe(400)
+    expect(calls).toHaveLength(0)
+    expect(await (await post('machine', request)).json()).toMatchObject({ code: 'probe' }); expect(calls).toEqual([['machine', request]])
+})

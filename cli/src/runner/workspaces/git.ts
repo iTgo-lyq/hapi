@@ -27,11 +27,11 @@ export function gitProcessStopped(record: NonNullable<WorkspaceOperation['proces
         return !rows.some(row => { const [group, state] = row.trim().split(/\s+/); return Number(group) === record.pid && !state?.startsWith('Z') })
     } catch { return false }
 }
-export type GitOptions = { env?: NodeJS.ProcessEnv; timeoutMs?: number; allowFailure?: boolean; signal?: AbortSignal;
+export type GitOptions = { config?: readonly string[]; env?: NodeJS.ProcessEnv; timeoutMs?: number; allowFailure?: boolean; signal?: AbortSignal;
     process?: (process: WorkspaceOperation['process']) => void }
 export async function git(cwd: string, args: string[], options: GitOptions = {}) {
     if (options.signal?.aborted) throw new WorkspaceError('git_interrupted', 'Runner stopped before executing Git.')
-    const child = spawn('git', args, { cwd, env: gitEnvironment(options.env), stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' })
+    const child = spawn('git', [...(options.config ?? []).flatMap(value => ['-c', value]), ...args], { cwd, env: gitEnvironment(options.env), stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' })
     const exited = new Promise<{ exitCode: number; error?: Error }>(resolve => {
         child.once('error', error => resolve({ exitCode: -1, error }))
         child.once('close', code => resolve({ exitCode: code ?? -1 }))

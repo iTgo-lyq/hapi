@@ -22,7 +22,7 @@ function setup(path = ':memory:') {
     cleanup.push(() => { engine.stop(); store.close() })
     for (const [id, namespace] of [['machine', 'default'], ['other', 'default'], ['foreign', 'tenant']]) {
         engine.getOrCreateMachine(id!, { host: 'local', platform: 'linux', happyCliVersion: '0.30.7',
-            capabilities: [MACHINE_CAPABILITIES.AgentAvailability] }, { status: 'running', capabilities: { mcpToolFilter: true, managedWorkspaces: 1, artifactTransfers: 1, artifactOutputs: 1, repositoryExport: 1, repositoryImport: 1 } }, namespace!)
+            capabilities: [MACHINE_CAPABILITIES.AgentAvailability] }, { status: 'running', capabilities: { mcpToolFilter: true, managedWorkspaces: 1, artifactTransfers: 1, artifactOutputs: 1, repositoryExport: 1, repositoryImport: 1, repositoryResults: 1 } }, namespace!)
         engine.handleMachineAlive({ machineId: id!, time: Date.now() })
     }
     const gateway = (engine as unknown as { rpcGateway: RpcGateway }).rpcGateway
@@ -376,4 +376,23 @@ it('routes repository operations only to an online capable machine in the curren
     engine.handleMachineAlive({ machineId: 'old-repository-runner', time: Date.now() })
     expect(await (await post('old-repository-runner', input)).json()).toMatchObject({ code: 'runner_upgrade_required' })
     expect(calls).toHaveLength(1)
+})
+
+
+it('gates sealed result exports separately and validates their public ownership selectors', async () => {
+    const { engine, gateway } = setup(), calls: unknown[] = []
+    engine.getOrCreateMachine('baseline-only', { host: 'host', platform: 'linux', happyCliVersion: 'old' },
+        { status: 'running', capabilities: { repositoryExport: 1, repositoryImport: 1 } }, 'default')
+    engine.handleMachineAlive({ machineId: 'baseline-only', time: Date.now() })
+    gateway.repositoryOperation = async (machineId, request) => { calls.push([machineId, request]); return { error: { code: 'probe', message: 'reached runner' } } }
+    const app = new Hono<WebAppEnv>(); app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() }); app.route('/api', createMachinesRoutes(() => engine))
+    const request = { action: 'export-result', operationId: crypto.randomUUID(), environmentId: crypto.randomUUID(), roundId: crypto.randomUUID() }
+    const post = (machine: string, body: unknown) => app.request(`/api/machines/${machine}/repositories`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    expect(await (await post('baseline-only', request)).json()).toMatchObject({ code: 'runner_upgrade_required' })
+    expect((await post('foreign', request)).status).toBe(403)
+    expect((await post('machine', { ...request, resultHead: 'a'.repeat(40) })).status).toBe(400)
+    expect((await post('machine', { ...request, roundId: '../escape' })).status).toBe(400)
+    expect(calls).toHaveLength(0)
+    expect(await (await post('machine', request)).json()).toMatchObject({ code: 'probe' })
+    expect(calls).toEqual([['machine', request]])
 })

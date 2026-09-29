@@ -3,12 +3,13 @@ import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rea
 import { mkdir, rename, rm } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { RepositorySnapshotSchema, type ManagedWorkspace, type RepositoryImport, type RepositoryImportRequest, type RepositoryOperation,
+import { type ManagedWorkspace, type RepositoryImport, type RepositoryImportRequest, type RepositoryOperation,
     type RepositorySnapshot, type WorkspaceSource } from '@hapi/protocol'
 import type { MachinePathPolicy } from '@/api/machinePathPolicy'
 import { captureFile } from '../artifacts/outputs'
 import { git, output, type GitOptions } from '../workspaces/git'
-import { fail, lfsFiles, logical, modules } from './assets'
+import { fail, lfsFiles, logical } from './assets'
+import { validateRepositoryManifest, validateRepositoryTree, verifyRepositorySnapshot } from './verify'
 import { repositoryReadEnvironment } from './export'
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -39,37 +40,9 @@ export class RepositoryCache {
         if (!await this.options.pathPolicy.allowsSpawn(path)) return fail('outside_workspace_roots', 'Repository cache is outside configured Runner roots.', path)
         if (realpathSync(path) !== path) return fail('repository_ownership_changed', 'Repository cache path was replaced.', path)
     }
-    private manifest(snapshot: RepositorySnapshot) {
-        RepositorySnapshotSchema.parse(snapshot)
-        const root = snapshot.repositories[0]!
-        if (root.path !== '' || root.module || root.commit !== snapshot.baseCommit || root.objectFormat !== snapshot.objectFormat) return fail('repository_manifest_invalid', 'Manifest root does not match its baseline.')
-        const paths = new Set<string>(), files = new Map(snapshot.files.map(file => [file.name, file])), used = new Set<string>()
-        if (files.size !== snapshot.files.length) return fail('repository_manifest_invalid', 'Duplicate manifest files.')
-        for (const repo of snapshot.repositories) {
-            if (paths.has(repo.path)) return fail('repository_manifest_invalid', 'Duplicate repository path.')
-            if (repo.path && (!repo.module || !paths.has(repo.module.parent) || !repo.module.path || !repo.module.name
-                || repo.path !== [repo.module.parent, repo.module.path].filter(Boolean).join('/'))) return fail('repository_manifest_invalid', 'Submodule parent must precede its child.')
-            paths.add(repo.path)
-            if (files.get(repo.file)?.kind !== 'bundle' || used.has(repo.file)) return fail('repository_manifest_invalid', 'A repository needs its own bundle file.')
-            used.add(repo.file)
-        }
-        const pointers = new Set<string>()
-        for (const item of snapshot.lfs) {
-            const file = files.get(item.file), key = `${item.repository}\0${item.path}`
-            if (!paths.has(item.repository) || !item.path || pointers.has(key) || file?.kind !== 'lfs' || file.sha256 !== item.oid || file.size !== item.size) return fail('repository_manifest_invalid', 'LFS descriptor does not match its repository or file.')
-            pointers.add(key); used.add(item.file)
-        }
-        if (used.size !== files.size) return fail('repository_manifest_invalid', 'Manifest contains unreferenced files.')
-    }
-    private async tree(snapshot: RepositorySnapshot, path: string, cwd: string, commit: string, options: GitOptions) {
-        const expected = snapshot.repositories.filter(repo => repo.module?.parent === path)
-            .map(repo => ({ name: repo.module!.name, path: repo.module!.path, commit: repo.commit })).sort((a, b) => a.path.localeCompare(b.path))
-        const actual = (await modules(cwd, commit, options)).sort((a, b) => a.path.localeCompare(b.path))
-        if (!same(expected, actual)) return fail('repository_gitlink_mismatch', 'Gitlinks or submodule definitions do not match the snapshot.', path)
-    }
     async import(request: RepositoryImportRequest, data: string, options: GitOptions,
         lock: <T>(key: string, action: () => Promise<T>) => Promise<T>): Promise<RepositoryImport> {
-        const snapshot = request.snapshot; this.manifest(snapshot)
+        const snapshot = request.snapshot; validateRepositoryManifest(snapshot)
         const files = new Map(request.files.map(file => [file.name, file.path]))
         if (files.size !== request.files.length || files.size !== snapshot.files.length || snapshot.files.some(file => !files.has(file.name))) return fail('repository_manifest_invalid', 'Import files must exactly match the manifest.')
         const opts = { ...options, env: { ...options.env, ...repositoryReadEnvironment, GIT_LFS_SKIP_SMUDGE: '1' } }
@@ -80,22 +53,7 @@ export class RepositoryCache {
             const fixed = await captureFile(dirname(path), { name: file.name, relativePath: path.slice(dirname(path).length + 1) }, join(data, 'files', file.name), options.signal ?? new AbortController().signal)
             if (fixed.size !== file.size || fixed.sha256 !== file.sha256) return fail('repository_file_mismatch', 'Downloaded file does not match the manifest.', file.name)
         }
-        // Always verify in independent empty stores, before consulting an existing shared cache.
-        for (const [index, repo] of snapshot.repositories.entries()) {
-            const verify = join(data, 'verify', String(index)), bundle = join(data, 'files', repo.file)
-            await mkdir(verify, { recursive: true, mode: 0o700 })
-            await git(verify, ['init', '--bare', `--object-format=${repo.objectFormat}`], opts)
-            const heads = (await output(verify, ['bundle', 'list-heads', bundle], opts)).split('\n')
-            if (!same(heads, [`${repo.commit} ${repo.bundleRef}`])) return fail('repository_bundle_refs', 'Bundle must contain exactly the declared commit and ref.', repo.path)
-            await git(verify, ['bundle', 'verify', bundle], opts)
-            await git(verify, ['fetch', '--no-tags', '--no-write-fetch-head', bundle, `${repo.bundleRef}:${ref(snapshot)}`], { ...opts, env: { ...opts.env, GIT_ALLOW_PROTOCOL: 'file' } })
-            if (await output(verify, ['rev-parse', `${ref(snapshot)}^{commit}`], opts) !== repo.commit) return fail('repository_bundle_commit', 'Imported commit differs from the manifest.')
-            await git(verify, ['fsck', '--full', '--no-reflogs', repo.commit], opts)
-            await this.tree(snapshot, repo.path, verify, repo.commit, opts)
-            const actual = (await lfsFiles(verify, repo.commit, opts)).map(file => ({ path: file.name, oid: file.oid, size: file.size })).sort((a, b) => a.path.localeCompare(b.path))
-            const expected = snapshot.lfs.filter(file => file.repository === repo.path).map(file => ({ path: file.path, oid: file.oid, size: file.size })).sort((a, b) => a.path.localeCompare(b.path))
-            if (!same(actual, expected)) return fail('repository_lfs_mismatch', 'Committed LFS pointers differ from the manifest.', repo.path)
-        }
+        await verifyRepositorySnapshot(snapshot, data, opts)
         return lock(this.commonDir(snapshot), async () => {
             const location = this.location(snapshot), owner = { scope: hash(this.options.scope), sourceMachineId: snapshot.sourceMachineId, repositoryId: snapshot.repositoryId }
             if (!existsSync(location)) {
@@ -150,7 +108,7 @@ export class RepositoryCache {
         if (receipt.version !== 1 || receipt.request.action !== 'import' || receipt.request.operationId !== source.snapshot.importOperationId
             || receipt.directory !== join(directory, 'data/files') || receipt.status !== 'succeeded' || receipt.retention !== 'retained'
             || !receipt.imported || receipt.request.snapshot.manifestId !== source.snapshot.manifestId) return fail('repository_import_unavailable', 'Snapshot has no retained successful import receipt.')
-        const snapshot = receipt.request.snapshot; this.manifest(snapshot)
+        const snapshot = receipt.request.snapshot; validateRepositoryManifest(snapshot)
         if (!same(receipt.imported.repositories, this.mapping(snapshot)) || !same({ ...source, relativePath: '' }, receipt.imported.source)) return fail('repository_source_changed', 'Workspace source does not match the imported snapshot.')
         logical(source.relativePath, true)
         for (const [index, repo] of snapshot.repositories.entries()) {
@@ -231,7 +189,7 @@ export class RepositoryCache {
             if (realpathSync(cwd) !== cwd) return fail('repository_ownership_changed', 'Snapshot checkout path was replaced.', repo.path)
             const head = await output(cwd, ['rev-parse', 'HEAD'], opts)
             if (repo.module && head !== repo.commit) return fail('repository_gitlink_mismatch', 'Submodule checkout differs from its snapshot.', repo.path)
-            await this.tree(snapshot, repo.path, cwd, head, opts)
+            await validateRepositoryTree(snapshot, repo.path, cwd, head, opts)
             const files = await lfsFiles(cwd, undefined, opts)
             if (!files.length) continue
             if (!verifyOnly) {

@@ -4,7 +4,7 @@ import { copyFile, rm } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { WorkspaceRequestSchema, type ManagedWorkspace, type PreparedWorkspace,
     type WorkspaceOperation, type WorkspacePreparation, type WorkspaceRequest, type WorkspaceResponse,
-    type WorkspaceSource } from '@hapi/protocol'
+    type WorkspaceSource, type WorkspaceResult } from '@hapi/protocol'
 import { MachinePathPolicy } from '@/api/machinePathPolicy'
 import { git, gitProcessStopped, output, WorkspaceError, workspaceProblem, type GitOptions } from './git'
 import type { RepositoryCache } from '../repositories/cache'
@@ -72,6 +72,39 @@ export class WorkspaceManager {
     repositoryRecords(commonDir: string): ManagedWorkspace[] {
         const directory = join(this.root, 'environments')
         return existsSync(directory) ? readdirSync(directory).map(id => this.read(id)).filter(workspace => workspace.source.commonDir === commonDir) : []
+    }
+    /** Hold the same lock as prepare/remove/launch until immutable result files are captured. */
+    async withSealedResult<T>(environmentId: string, roundId: string, options: GitOptions,
+        capture: (source: WorkspaceSource, result: WorkspaceResult) => Promise<T>): Promise<T> {
+        const initial = await this.inspect(environmentId)
+        return this.serial(initial.source.commonDir, async () => {
+            const workspace = this.read(environmentId), result = workspace.results[roundId]
+            if (workspace.status !== 'retained' || !result) return problem('workspace_result_missing', 'This retained environment has no sealed result for the requested round.')
+            if (Object.values(workspace.operations).some(op => ['accepted', 'running', 'unknown'].includes(op.status))
+                || Object.values(workspace.preparations).some(prep => !workspace.results[prep.roundId])) {
+                return problem('workspace_operation_pending', 'Seal and reconcile the current round before capturing results.')
+            }
+            await this.idle(workspace)
+            await this.validate(workspace)
+            const ref = `refs/hapi/workspaces/${environmentId}/rounds/${roundId}`
+            const preparation = Object.values(workspace.preparations).find(prep => prep.roundId === roundId)
+            if (result.environmentId !== environmentId || result.roundId !== roundId || result.resultRef !== ref
+                || result.baseCommit !== workspace.source.baseCommit || result.startHead !== preparation?.startHead) {
+                return problem('workspace_result_mismatch', 'Sealed result does not match its environment and preparation.')
+            }
+            if (await output(workspace.checkout, ['rev-parse', '--verify', `${ref}^{commit}`], options) !== result.resultHead) {
+                return problem('workspace_result_missing', 'The sealed result reference is missing or changed.')
+            }
+            const latest = Object.values(workspace.results).sort((a, b) => b.sealedAt - a.sealedAt)[0]!
+            if (await this.head(workspace) !== latest.resultHead || !await this.clean(workspace)) {
+                return problem('workspace_drift', 'Checkout has unsealed changes; retain it and reconcile before capturing results.')
+            }
+            // The task cwd can have been deleted by the task. Objects belong to the checkout root.
+            const source = { ...workspace.source, sourcePath: workspace.checkout, repositoryRoot: workspace.checkout,
+                relativePath: '', baseRef: ref, baseCommit: result.resultHead, dirty: false }
+            delete source.snapshot
+            return capture(source, structuredClone(result))
+        })
     }
     private async allowed(path: string) {
         if (!await this.options.pathPolicy.allowsSpawn(path)) return problem('outside_workspace_roots', 'Workspace path is outside the configured Runner roots.', path)

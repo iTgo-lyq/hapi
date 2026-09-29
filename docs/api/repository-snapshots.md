@@ -1,15 +1,16 @@
-# Repository baselines and caches
+# Repository baselines, sealed results and caches
 
-`POST /api/machines/:id/repositories` uses the existing client JWT, machine namespace and Runner RPC. An online Runner advertising `repositoryExport: 1` can export a fixed baseline; `repositoryImport: 1` adds independently verified target caches. Neither operation starts a native session.
+`POST /api/machines/:id/repositories` uses the existing client JWT, machine namespace and Runner RPC. An online Runner advertising `repositoryExport: 1` can export a fixed baseline; `repositoryImport: 1` adds independently verified target caches. `repositoryResults: 1` adds sealed result export. These operations do not start native sessions.
 
 ## Operations
 
 - `export`: `{ action, operationId, source }`, where `source` is the fixed `WorkspaceSource` returned by the managed-workspace resolve operation. The source commit is required; export never resolves a moving branch again.
+- `export-result`: `{ action, operationId, environmentId, roundId }` selects a result sealed by this Runner. Callers cannot supply or replace the result facts. Success includes `sealed: { source, result, verifiedAt }` and a complete independently verified snapshot.
 - `import`: `{ action, operationId, snapshot, files: [{ name, path }] }`. Files must exactly match the snapshot and be present at allowed absolute paths, normally returned by artifact materialization. Success returns `imported.source` and the owned root/submodule cache mapping.
 - `inspect`: `{ action, operationId }` returns the original operation, immutable snapshot and any error.
 - `release`: `{ action, operationId, names? }` removes stopped export candidates or releases an import's cache holding. Names select exported files; import release requires omission. The receipt and snapshot remain queryable.
 
-Export/import return persisted `accepted` receipts and run in the background. Inspect reports `accepted`, `running`, `succeeded`, `failed` or `unknown`. Repeating the same ID and arguments returns the original receipt; different arguments conflict. A restarted Runner reconciles the saved Git process. Incomplete, stopped operations become explicit failures and are not automatically rerun. Use a new operation with the original snapshot after repairing the error. Inspecting a successful import also checks its source ownership and retained refs.
+Export, result export and import return persisted `accepted` receipts and run in the background. Inspect reports `accepted`, `running`, `succeeded`, `failed` or `unknown`. Repeating the same ID and arguments returns the original receipt; different arguments conflict. A restarted Runner reconciles the saved Git process. Incomplete, stopped operations become explicit failures and are not automatically rerun. Use a new operation with the original snapshot after repairing the error. Inspecting a successful import also checks its source ownership and retained refs.
 
 ## Content and ownership
 
@@ -22,6 +23,14 @@ Export uses scratch bare repositories with read-only source object alternates. R
 Full Git history reachable from the selected commit is exported. Shallow repositories, missing submodule commits and missing/corrupt LFS entities fail explicitly. Submodule objects must already exist in the source. LFS enumeration uses git-lfs when required, including custom source storage; repositories without LFS can export without that executable. Historical commits' LFS entities are not included unless required by the selected baseline tree.
 
 A successful export means candidates are fixed. Import independently verifies bundle format, references and complete object closure before a workspace can be prepared.
+
+## Sealed result export
+
+Result export holds the managed repository lock used by prepare/remove/launch until all immutable candidates are captured and checked. It requires a retained owned checkout, a sealed round matching its preparation, matching immutable ref, a clean checkout at the latest sealed HEAD, reconciled workspace operations and verified native stop evidence. A new unsealed round or unknown execution blocks capture. The operation does not create a checkpoint, rewrite history or change the native runtime.
+
+Capture reads the selected sealed commit from the checkout root, so deletion of the original task subdirectory does not lose the result. It reuses full root/recursive module/LFS export, then the same independent empty-store verifier as import. The verified Git history must contain base → start → result ancestry. Only then are `snapshot` and `sealed` persisted together. Scratch alternates and verification repositories are removed; candidate files remain for artifact delivery. No-change and partial results preserve their original facts. Changed or dirty submodules retain the existing workspace-finalize rejection policy.
+
+Once successful, repeating the original operation or inspecting after Runner restart returns the same snapshot without reading the checkout again. Later rounds cannot change its files. An interrupted capture with no complete receipt fails after Git stop is proven; explicit new attempts still select the original sealed round. Release uses the existing partial/whole export cleanup, leaving workspace refs, commits, checkout and receipt untouched. Independent verification establishes machine candidates, not center delivery or business acceptance. Consumers must retain the initial baseline's LFS entities separately when those differ from the result tree.
 
 ## Target import and managed workspaces
 

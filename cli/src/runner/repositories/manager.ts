@@ -4,9 +4,11 @@ import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { RepositoryRequestSchema, type ManagedWorkspace, type RepositoryOperation, type RepositoryRequest, type RepositoryResponse, type WorkspaceSource } from '@hapi/protocol'
 import { MachinePathPolicy } from '@/api/machinePathPolicy'
-import { gitProcessStopped, WorkspaceError, workspaceProblem, type GitOptions } from '../workspaces/git'
+import { git, gitProcessStopped, WorkspaceError, workspaceProblem, type GitOptions } from '../workspaces/git'
 import { exportRepository, repositoryReadEnvironment } from './export'
 import type { RepositoryCache } from './cache'
+import type { WorkspaceManager } from '../workspaces/manager'
+import { verifyRepositorySnapshot } from './verify'
 
 const fail = (code: string, message: string, hint?: string): never => { throw new WorkspaceError(code, message, hint) }
 /** Durable machine repository receipts; artifacts owns their network delivery. */
@@ -18,11 +20,12 @@ export class RepositoryManager {
     constructor(private readonly options: { home: string; pathPolicy: MachinePathPolicy;
         resolveSource: (cwd: string, baseRef: string, options?: GitOptions, readDirty?: boolean) => Promise<WorkspaceSource>; gitTimeoutMs?: number; cache?: RepositoryCache;
         repositoryWorkspaces?: (commonDir: string) => ManagedWorkspace[];
+        withSealedResult?: WorkspaceManager['withSealedResult'];
         withRepositoryLock?: <T>(key: string, action: () => Promise<T>) => Promise<T> }) {
         mkdirSync(options.home, { recursive: true, mode: 0o700 })
         this.root = join(realpathSync(options.home), 'workspaces', 'exports')
     }
-    private directory(id: string, action?: 'export' | 'import') {
+    private directory(id: string, action?: RepositoryOperation['request']['action']) {
         if (!/^[a-f0-9-]{36}$/i.test(id)) return fail('repository_id_invalid', 'Invalid repository operation ID.')
         const imported = join(this.root, '..', 'imports', id)
         return action === 'import' || !action && existsSync(join(imported, 'operation.json')) ? imported : join(this.root, id)
@@ -84,6 +87,24 @@ export class RepositoryManager {
                 if (!this.options.cache || !this.options.withRepositoryLock) return fail('repository_import_unavailable', 'Runner repository import is not configured.')
                 record.imported = await this.options.cache.import(record.request, join(this.directory(record.request.operationId, 'import'), 'data'), gitOptions, this.options.withRepositoryLock)
                 record.snapshot = record.request.snapshot
+            } else if (record.request.action === 'export-result') {
+                if (!this.options.withSealedResult) return fail('repository_results_unavailable', 'Runner result export is not configured.')
+                const request = record.request, data = join(this.directory(request.operationId), 'data')
+                await this.options.withSealedResult(request.environmentId, request.roundId, gitOptions, async (source, result) => {
+                    const snapshot = await exportRepository({ source, manifestId: request.operationId,
+                        directory: data, pathPolicy: this.options.pathPolicy, gitOptions })
+                    const verified = await verifyRepositorySnapshot(snapshot, data, gitOptions)
+                    for (const [ancestor, head] of [[result.baseCommit, result.startHead], [result.startHead, result.resultHead]]) {
+                        if ((await git(verified, ['merge-base', '--is-ancestor', ancestor!, head!], { ...gitOptions, allowFailure: true })).exitCode !== 0) {
+                            return fail('repository_result_history', 'Result bundle does not contain the sealed baseline/start/result ancestry.')
+                        }
+                    }
+                    // Only these owned files survive; neither source alternates nor verification stores are deliverables.
+                    await rm(join(data, 'scratch'), { recursive: true, force: true })
+                    await rm(join(data, 'verify'), { recursive: true, force: true })
+                    record.snapshot = snapshot; record.sealed = { source, result, verifiedAt: Date.now() }
+                    this.save(record)
+                })
             } else {
                 const expected = record.request.source
                 const actual = await this.options.resolveSource(expected.sourcePath, expected.baseCommit, gitOptions, false)
@@ -105,7 +126,9 @@ export class RepositoryManager {
             if (record.process && !gitProcessStopped(record.process)) {
                 record.status = 'unknown'; record.error = { code: 'repository_process_unknown', message: 'The previous Git subprocess group has not been confirmed stopped.' }
             } else {
-                record.process = undefined; record.status = (record.request.action === 'export' ? record.snapshot : record.imported) ? 'succeeded' : 'failed'
+                const complete = record.request.action === 'import' ? record.imported
+                    : record.request.action === 'export-result' ? record.snapshot && record.sealed : record.snapshot
+                record.process = undefined; record.status = complete ? 'succeeded' : 'failed'
                 record.error = record.status === 'succeeded' ? undefined : { code: `repository_${record.request.action}_interrupted`, message: 'Repository operation stopped without a complete receipt.', hint: 'Inspect the source and create a new request using the original fixed commit; this operation will not rerun.' }
             }
             record.updatedAt = Date.now(); this.save(record)

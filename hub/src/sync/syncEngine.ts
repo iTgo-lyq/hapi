@@ -2192,7 +2192,8 @@ export class SyncEngine {
         const machine = this.getMachineByNamespace(machineId, namespace)
         if (!machine) return { error: { code: 'machine_not_found', message: 'Machine not found in namespace' } }
         if (!machine.active) return { error: { code: 'machine_offline', message: 'Machine is offline' } }
-        const capability = request.action === 'import' ? 'repositoryImport' : 'repositoryExport'
+        const capability = request.action === 'export-result' ? 'repositoryResults'
+            : request.action === 'import' ? 'repositoryImport' : 'repositoryExport'
         if (machine.runnerState?.capabilities?.[capability] !== 1) return { error: { code: 'runner_upgrade_required', message: 'Upgrade the Runner to use repository baselines' } }
         return this.rpcGateway.repositoryOperation(machineId, request)
     }

@@ -22,6 +22,7 @@ export const RUNNER_CAPABILITIES = {
     artifactOutputs: 1 as const,
     repositoryExport: 1 as const,
     repositoryImport: 1 as const,
+    repositoryResults: 1 as const,
     agentAvailabilityDetails: true as const,
     piExistingSessionResume: true as const,
     agentConfigs: getBuiltinAgentConfigDescriptors()

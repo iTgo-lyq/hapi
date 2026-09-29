@@ -22,7 +22,7 @@ function setup(path = ':memory:') {
     cleanup.push(() => { engine.stop(); store.close() })
     for (const [id, namespace] of [['machine', 'default'], ['other', 'default'], ['foreign', 'tenant']]) {
         engine.getOrCreateMachine(id!, { host: 'local', platform: 'linux', happyCliVersion: '0.30.7',
-            capabilities: [MACHINE_CAPABILITIES.AgentAvailability] }, { status: 'running', capabilities: { mcpToolFilter: true, managedWorkspaces: 1, artifactTransfers: 1, artifactOutputs: 1 } }, namespace!)
+            capabilities: [MACHINE_CAPABILITIES.AgentAvailability] }, { status: 'running', capabilities: { mcpToolFilter: true, managedWorkspaces: 1, artifactTransfers: 1, artifactOutputs: 1, repositoryExport: 1 } }, namespace!)
         engine.handleMachineAlive({ machineId: id!, time: Date.now() })
     }
     const gateway = (engine as unknown as { rpcGateway: RpcGateway }).rpcGateway
@@ -335,5 +335,28 @@ it('gates output operations on Runner support and forwards declared candidates w
     expect(await (await post('machine', request)).json()).toMatchObject({ code: 'fixture', hint: 'Inspect it' })
     expect(calls).toEqual([['machine', request]])
     expect((await post('machine', { ...request, files: [{ name: 'escape', relativePath: '../escape' }] })).status).toBe(400)
+    expect(calls).toHaveLength(1)
+})
+
+
+it('routes repository operations only to an online capable machine in the current namespace', async () => {
+    const { engine, gateway } = setup(), calls: unknown[] = []
+    const input = { action: 'inspect' as const, operationId: crypto.randomUUID() }
+    gateway.repositoryOperation = async (machine, request) => { calls.push([machine, request]); return { error: { code: 'repository_operation_missing', message: 'Not found' } } }
+    const app = new Hono<WebAppEnv>()
+    app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
+    app.route('/api', createMachinesRoutes(() => engine))
+    const post = (machine: string, body: unknown) => app.request(`/api/machines/${machine}/repositories`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+    })
+    expect((await post('foreign', input)).status).toBe(403)
+    expect((await post('machine', { ...input, operationId: '../escape' })).status).toBe(400)
+    expect(calls).toHaveLength(0)
+    const result = await post('machine', input)
+    expect(result.status).toBe(409); expect(await result.json()).toMatchObject({ code: 'repository_operation_missing' })
+    expect(calls).toEqual([['machine', input]])
+    engine.getOrCreateMachine('old-repository-runner', { host: 'host', platform: 'linux', happyCliVersion: 'old' }, { status: 'running' }, 'default')
+    engine.handleMachineAlive({ machineId: 'old-repository-runner', time: Date.now() })
+    expect(await (await post('old-repository-runner', input)).json()).toMatchObject({ code: 'runner_upgrade_required' })
     expect(calls).toHaveLength(1)
 })

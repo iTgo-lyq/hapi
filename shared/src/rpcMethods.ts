@@ -13,6 +13,7 @@ export const RPC_METHODS = {
     PathExists: 'path-exists',
     ArtifactTransfer: 'artifact-transfer',
     ManagedWorkspace: 'managed-workspace',
+    RepositoryOperation: 'repository-operation',
     AgentAvailability: 'agent-availability',
     CursorChatStoreStatus: 'cursor-chat-store-status',
     GitStatus: 'git-status',

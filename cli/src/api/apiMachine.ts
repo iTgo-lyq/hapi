@@ -24,6 +24,7 @@ import {
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import { RUNNER_CAPABILITIES } from '@hapi/protocol'
 import { transferProblem, type ArtifactTransferManager } from '@/runner/artifacts/manager'
+import type { RepositoryManager } from '@/runner/repositories/manager'
 import type { WorkspaceManager } from '@/runner/workspaces/manager'
 import { workspaceProblem } from '@/runner/workspaces/git'
 import type { RunnerState, Machine, MachineMetadata } from './types'
@@ -75,6 +76,7 @@ export { normalizeWindowsDriveRoot } from './machinePathPolicy'
 type MachineRpcHandlers = {
     workspaces?: WorkspaceManager
     artifacts?: ArtifactTransferManager
+    repositories?: RepositoryManager
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>
     stopSession: (
         sessionId: string,
@@ -409,7 +411,13 @@ export class ApiMachineClient {
         return this.pathPolicy.isWithinSpawnRoots(resolvedCwd)
     }
 
-    setRPCHandlers({ spawnSession, stopSession, requestShutdown, workspaces, artifacts }: MachineRpcHandlers): void {
+    setRPCHandlers({ spawnSession, stopSession, requestShutdown, workspaces, artifacts, repositories }: MachineRpcHandlers): void {
+        this.rpcHandlerManager.registerHandler(RPC_METHODS.RepositoryOperation, async (request: unknown) => {
+            try {
+                if (!repositories) throw new Error('Repository snapshots are unavailable')
+                return await repositories.request(request)
+            } catch (error) { return { error: workspaceProblem(error) } }
+        })
         this.rpcHandlerManager.registerHandler(RPC_METHODS.ArtifactTransfer, async (request: unknown) => {
             try {
                 if (!artifacts) throw new Error('Machine file transfers are unavailable')

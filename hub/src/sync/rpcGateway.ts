@@ -1,3 +1,4 @@
+import type { RepositoryRequest, RepositoryResponse } from '@hapi/protocol'
 import type { PreparedWorkspace, PreparedFiles, ArtifactTransferRequest, ArtifactTransferResponse, WorkspaceRequest, WorkspaceResponse } from '@hapi/protocol'
 import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, PermissionMode } from '@hapi/protocol/types'
 import { InterruptExecutionResponseSchema, type InterruptExecutionRequest, type InterruptExecutionResponse } from '@hapi/protocol'
@@ -613,6 +614,10 @@ export class RpcGateway {
 
     async listPiModelsForMachine(machineId: string): Promise<RpcListPiModelsResponse> {
         return await this.machineRpc(machineId, RPC_METHODS.ListPiModelsForMachine, {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListPiModelsResponse
+    }
+
+    async repositoryOperation(machineId: string, request: RepositoryRequest): Promise<RepositoryResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.RepositoryOperation, request) as RepositoryResponse
     }
 
     async artifactOperation(machineId: string, request: ArtifactTransferRequest): Promise<ArtifactTransferResponse> {

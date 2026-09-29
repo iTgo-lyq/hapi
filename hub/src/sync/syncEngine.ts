@@ -1,3 +1,4 @@
+import type { RepositoryRequest, RepositoryResponse } from '@hapi/protocol'
 /**
  * Sync Engine for HAPI Telegram Bot (Direct Connect)
  *
@@ -2185,6 +2186,14 @@ export class SyncEngine {
             return { error: { code: 'artifact_execution_active', message: 'Archive executions using these inputs before releasing them' } }
         }
         return this.rpcGateway.artifactOperation(machineId, request)
+    }
+
+    async repositoryOperation(machineId: string, namespace: string, request: RepositoryRequest): Promise<RepositoryResponse> {
+        const machine = this.getMachineByNamespace(machineId, namespace)
+        if (!machine) return { error: { code: 'machine_not_found', message: 'Machine not found in namespace' } }
+        if (!machine.active) return { error: { code: 'machine_offline', message: 'Machine is offline' } }
+        if (machine.runnerState?.capabilities?.repositoryExport !== 1) return { error: { code: 'runner_upgrade_required', message: 'Upgrade the Runner to export repository baselines' } }
+        return this.rpcGateway.repositoryOperation(machineId, request)
     }
 
     async workspaceOperation(machineId: string, namespace: string, request: WorkspaceRequest) {

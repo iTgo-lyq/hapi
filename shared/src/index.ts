@@ -32,3 +32,5 @@ export * from './workspaces'
 export * from './artifacts'
 
 export * from './artifactTransfers'
+
+export * from './repositories'

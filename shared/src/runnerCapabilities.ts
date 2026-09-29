@@ -20,6 +20,7 @@ export const RUNNER_CAPABILITIES = {
     managedWorkspaces: 1 as const,
     artifactTransfers: 1 as const,
     artifactOutputs: 1 as const,
+    repositoryExport: 1 as const,
     agentAvailabilityDetails: true as const,
     piExistingSessionResume: true as const,
     agentConfigs: getBuiltinAgentConfigDescriptors()

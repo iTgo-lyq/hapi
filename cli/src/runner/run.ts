@@ -37,6 +37,7 @@ import { cleanupRunnerState, getInstalledCliMtimeMs, isRunnerRunningCurrentlyIns
 import { startRunnerControlServer } from './controlServer';
 import { ArtifactTransferManager } from './artifacts/manager';
 import { WorkspaceManager } from './workspaces/manager';
+import { RepositoryManager } from './repositories/manager';
 import { WorkspaceError } from './workspaces/git';
 import { MachinePathPolicy } from '@/api/machinePathPolicy';
 import { createWorktree, removeWorktree, type WorktreeInfo } from './worktree';
@@ -601,6 +602,10 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     };
     const workspaces = new WorkspaceManager({
       home: configuration.happyHomeDir, machineId, pathPolicy: new MachinePathPolicy({ workspaceRoots }), assertStopped,
+    });
+    const repositories = new RepositoryManager({
+      home: configuration.happyHomeDir, pathPolicy: new MachinePathPolicy({ workspaceRoots }),
+      resolveSource: (cwd, baseRef, options, readDirty) => workspaces.resolveSource(cwd, baseRef, options, readDirty),
     });
     const artifacts = new ArtifactTransferManager({
       home: configuration.happyHomeDir, url: configuration.apiUrl, token: configuration.cliApiToken, extraHeaders: configuration.extraHeaders,
@@ -1719,6 +1724,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     apiMachine.setRPCHandlers({
       workspaces,
       artifacts,
+      repositories,
       spawnSession,
       stopSession,
       requestShutdown: () => requestShutdown('hapi-app')
@@ -2004,6 +2010,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       await new Promise(resolve => setTimeout(resolve, 100));
 
       apiMachine.shutdown();
+      await repositories.stop();
       await workspaces.stop();
       await artifacts.stop();
       await stopControlServer();

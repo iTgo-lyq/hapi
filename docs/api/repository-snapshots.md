@@ -7,7 +7,7 @@
 - `export`: `{ action, operationId, source }`, where `source` is the fixed `WorkspaceSource` returned by the managed-workspace resolve operation. The source commit is required; export never resolves a moving branch again.
 - `import`: `{ action, operationId, snapshot, files: [{ name, path }] }`. Files must exactly match the snapshot and be present at allowed absolute paths, normally returned by artifact materialization. Success returns `imported.source` and the owned root/submodule cache mapping.
 - `inspect`: `{ action, operationId }` returns the original operation, immutable snapshot and any error.
-- `release`: `{ action, operationId, names? }` removes stopped export candidates. Names select already declared files; omission releases all candidates and scratch data. The receipt and snapshot remain queryable.
+- `release`: `{ action, operationId, names? }` removes stopped export candidates or releases an import's cache holding. Names select exported files; import release requires omission. The receipt and snapshot remain queryable.
 
 Export/import return persisted `accepted` receipts and run in the background. Inspect reports `accepted`, `running`, `succeeded`, `failed` or `unknown`. Repeating the same ID and arguments returns the original receipt; different arguments conflict. A restarted Runner reconciles the saved Git process. Incomplete, stopped operations become explicit failures and are not automatically rerun. Use a new operation with the original snapshot after repairing the error. Inspecting a successful import also checks its source ownership and retained refs.
 
@@ -33,4 +33,12 @@ Verified objects enter `workspaces/repositories/<origin-key>/`. The key includes
 
 Pass this source to the existing workspace `prepare` operation. Submodules are initialized one level at a time from owned local caches, with checkout-scoped URL/active configuration; recursive names and relative upstream URLs cannot redirect downloads to the original source. LFS filters/storage are configured only in owned repositories, without requiring global filter configuration or installing hooks. Local entity copies and `lfs checkout` hydrate the files; cache workspaces never call `lfs pull`. Preparation hashes the resulting LFS bytes. Launch rechecks Git state, inputs, snapshot refs/gitlinks, and LFS checkout/downloaded flags without another full large-file hash scan.
 
-Subsequent rounds use the existing finalize/prepare lifecycle and the last sealed result, including new local LFS objects. Original local workspace sources retain their existing behavior. Candidate `release` does not remove imports or caches; those remain retained pending explicit workspace-aware cache cleanup. Remote task orchestration and code-result delivery are separate consumer responsibilities.
+Subsequent rounds use the existing finalize/prepare lifecycle and the last sealed result, including new local LFS objects. Original local workspace sources retain their existing behavior. Remote task orchestration and code-result delivery are separate consumer responsibilities.
+
+## Cache release
+
+Import release uses the same repository lock as import and managed workspaces. Environments using that import must already be removed, with no pending operations or result commits beyond their original baseline; otherwise release rejects and retains the holding. Other retained imports keep the shared cache. The response's `cache` reports the directory, retention and any reason.
+
+Final cache removal also checks all owned environment records, Git worktree registrations and refs. Only refs matching saved snapshots, the original cache base and unchanged results of removed environments are disposable. Unknown refs, external worktrees or unrecognized entries preserve the cache and return a reason. Repair the reported condition and repeat the same release; this does not start a model or discard new code.
+
+A checked cache is atomically moved to that import's owned `data/released-cache` before recursive deletion. Interrupted deletion resumes there; it cannot delete a later import which recreated the shared location. Import receipts remain queryable with `retention=released`; released sources cannot prepare or launch new workspaces. Center recovery pins are managed by the consuming coordinator, not by this machine API.

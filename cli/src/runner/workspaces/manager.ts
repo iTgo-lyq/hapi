@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { createReadStream, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { createReadStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { copyFile, rm } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { WorkspaceRequestSchema, type ManagedWorkspace, type PreparedWorkspace,
@@ -69,6 +69,10 @@ export class WorkspaceManager {
         return operation
     }
     withRepositoryLock<T>(key: string, action: () => Promise<T>) { return this.serial(key, action) }
+    repositoryRecords(commonDir: string): ManagedWorkspace[] {
+        const directory = join(this.root, 'environments')
+        return existsSync(directory) ? readdirSync(directory).map(id => this.read(id)).filter(workspace => workspace.source.commonDir === commonDir) : []
+    }
     private async allowed(path: string) {
         if (!await this.options.pathPolicy.allowsSpawn(path)) return problem('outside_workspace_roots', 'Workspace path is outside the configured Runner roots.', path)
     }
@@ -317,6 +321,9 @@ export class WorkspaceManager {
     }
     private async finalize(workspace: ManagedWorkspace, operation: WorkspaceOperation, request: Finalize) {
         await this.validate(workspace); await this.noGitOperation(workspace)
+        if (request.unchangedHead && (await this.head(workspace) !== request.unchangedHead || !await this.clean(workspace))) {
+            return problem('workspace_unrecovered_changes', 'This release requires the unchanged starting commit and a clean checkout; code changes were retained.')
+        }
         const preparation = workspace.preparations[request.preparationId]
         if (!preparation || preparation.roundId !== request.roundId) return problem('workspace_preparation_mismatch', 'Result does not belong to the prepared round.')
         if (request.sessionId) {

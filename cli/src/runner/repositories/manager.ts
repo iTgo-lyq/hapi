@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
-import { RepositoryRequestSchema, type RepositoryOperation, type RepositoryRequest, type RepositoryResponse, type WorkspaceSource } from '@hapi/protocol'
+import { RepositoryRequestSchema, type ManagedWorkspace, type RepositoryOperation, type RepositoryRequest, type RepositoryResponse, type WorkspaceSource } from '@hapi/protocol'
 import { MachinePathPolicy } from '@/api/machinePathPolicy'
 import { gitProcessStopped, WorkspaceError, workspaceProblem, type GitOptions } from '../workspaces/git'
 import { exportRepository, repositoryReadEnvironment } from './export'
@@ -17,6 +17,7 @@ export class RepositoryManager {
     private readonly shutdown = new AbortController()
     constructor(private readonly options: { home: string; pathPolicy: MachinePathPolicy;
         resolveSource: (cwd: string, baseRef: string, options?: GitOptions, readDirty?: boolean) => Promise<WorkspaceSource>; gitTimeoutMs?: number; cache?: RepositoryCache;
+        repositoryWorkspaces?: (commonDir: string) => ManagedWorkspace[];
         withRepositoryLock?: <T>(key: string, action: () => Promise<T>) => Promise<T> }) {
         mkdirSync(options.home, { recursive: true, mode: 0o700 })
         this.root = join(realpathSync(options.home), 'workspaces', 'exports')
@@ -113,8 +114,31 @@ export class RepositoryManager {
     }
     private async release(request: Extract<RepositoryRequest, { action: 'release' }>) {
         const record = this.inspect(request.operationId)
-        if (record.request.action === 'import') return fail('repository_cache_retained', 'Imported caches are retained with their workspaces; candidate release cannot delete them.')
         if (this.jobs.has(request.operationId) || !['succeeded', 'failed'].includes(record.status)) return fail('repository_operation_pending', 'Wait for export to stop before releasing its candidates.')
+        if (record.request.action === 'import') {
+            if (request.names) return fail('repository_release_names_invalid', 'An import must be released as a whole.')
+            if (!this.options.cache || !this.options.withRepositoryLock || !this.options.repositoryWorkspaces) return fail('repository_release_unavailable', 'Runner cache retention checks are unavailable.')
+            if (record.process && !gitProcessStopped(record.process)) return fail('repository_process_unknown', 'Previous repository subprocess has not been confirmed stopped.')
+            record.process = undefined
+            const cache = this.options.cache, commonDir = cache.commonDir(record.request.snapshot)
+            return this.options.withRepositoryLock(commonDir, async () => {
+                const data = join(this.directory(request.operationId, 'import'), 'data'), retired = join(data, 'released-cache')
+                if (record.retention === 'releasing' && (existsSync(retired) || record.cache?.retained === false)) {
+                    await rm(data, { recursive: true, force: true })
+                    record.cache = { retained: false, directory: join(commonDir, '..') }
+                    record.retention = 'released'; record.updatedAt = Date.now(); this.save(record); return record
+                }
+                const imports = join(this.root, '..', 'imports')
+                const receipts = existsSync(imports) ? readdirSync(imports).map(id => this.read(id)) : []
+                const options: GitOptions = { timeoutMs: this.options.gitTimeoutMs, signal: this.shutdown.signal,
+                    process: child => { record.process = child; record.updatedAt = Date.now(); this.save(record) } }
+                record.cache = await cache.release(record, receipts, this.options.repositoryWorkspaces!(commonDir), retired, options,
+                    () => { record.retention = 'releasing'; record.updatedAt = Date.now(); this.save(record) })
+                record.updatedAt = Date.now(); this.save(record)
+                await rm(data, { recursive: true, force: true })
+                record.retention = 'released'; record.updatedAt = Date.now(); this.save(record); return record
+            })
+        }
         if (record.retention === 'released') return record
         const names = record.snapshot?.files.map(file => file.name) ?? []
         if (request.names?.some(name => !names.includes(name))) return fail('repository_file_missing', 'No exported file has the requested name.')
@@ -133,5 +157,5 @@ export class RepositoryManager {
         return record
     }
     async settled() { await Promise.all(this.jobs.values()) }
-    async stop() { this.shutdown.abort(); await this.settled() }
+    async stop() { this.shutdown.abort(); await this.settled(); await Promise.all(this.locks.values()) }
 }

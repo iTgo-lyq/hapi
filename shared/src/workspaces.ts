@@ -21,7 +21,7 @@ export const WorkspaceRequestSchema = z.discriminatedUnion('action', [
         source: WorkspaceSourceSchema, expectedHead: sha, inputs: z.array(input).max(100).default([]).refine(files => new Set(files.map(file => file.name)).size === files.length, 'Duplicate input names') }),
     z.strictObject({ action: z.literal('inspect'), environmentId: id }),
     z.strictObject({ action: z.literal('finalize'), environmentId: id, preparationId: id, roundId: id, attemptId: id,
-        sessionId: z.string().min(1).optional(), partial: z.boolean().default(false) }),
+        sessionId: z.string().min(1).optional(), partial: z.boolean().default(false), unchangedHead: sha.optional() }),
     z.strictObject({ action: z.literal('remove'), environmentId: id, attemptId: id, expectedHead: sha, discardIgnored: z.boolean().default(false) }),
 ])
 export type WorkspaceRequest = z.infer<typeof WorkspaceRequestSchema>

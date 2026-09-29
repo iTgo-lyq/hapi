@@ -13,7 +13,7 @@ Source: `shared/src/workspaces.ts`, `hub/src/web/routes/machines.ts`, `cli/src/r
 | resolve | cwd; optional baseRef (HEAD) | source with committed SHA, commonDir, repositoryId and relative cwd |
 | prepare | environmentId, preparationId, roundId, source, expectedHead; optional inputs | workspace and durable operation receipt |
 | inspect | environmentId | workspace, preparations, results and operation receipts |
-| finalize | environmentId, preparationId, roundId, attemptId; optional sessionId, partial | workspace and operation receipt |
+| finalize | environmentId, preparationId, roundId, attemptId; optional sessionId, partial, unchangedHead | workspace and operation receipt |
 | remove | environmentId, attemptId, expectedHead; optional discardIgnored | workspace and operation receipt |
 
 UUID identities are assigned before sending. The schema is authoritative for fields and validation. Domain rejections use HTTP 409 with `{error, code, hint?}`; malformed requests use 400. A mutation response acknowledges acceptance, not completion: inspect its operation until `succeeded`, `failed` or `unknown`.
@@ -33,6 +33,8 @@ The Hub retains the preparation through native bootstrap and metadata updates. R
 The Runner verifies associated executions stopped; the Hub also refuses finalization/removal while a checkout session is active or unarchived. Finalization retains existing agent commits and checkpoints remaining non-ignored changes. Empty changes do not create commits. Hooks and signing remain enabled; automatic commits identify `HAPI Checkpoint <checkpoint@hapi.local>` and include round/attempt trailers. Results retain base/start/result SHAs, a result ref, optional checkpoint, bounded changed paths and partial-result status.
 
 A prepared round cancelled before execution can omit sessionId when sealing. The Runner permits this only if that preparation has no associated launch, or all associated launches were definitively rejected with childStarted=false. Existing or uncertain executions still require their session identity and proven stop; this option cannot bypass either check.
+
+Coordinators releasing diagnostic environments can set `unchangedHead` to the original commit. Before any staging or checkpoint, finalization then requires that exact HEAD and a clean checkout. New commits or dirty files fail with `workspace_unrecovered_changes`; no code is silently committed for deletion. Stop proof, session ownership and existing result validation remain in force.
 
 Git commands run without interactive stdin and time out after 15 minutes. The Runner stops only its Git subprocess group. On restart, it reconciles known commits/receipts; it never reruns an unknown hook automatically. An unconfirmed live process blocks further mutations. An interrupted operation with proven process exit and no complete result becomes a repairable failure: inspect the checkout, repair or commit manually, then explicitly retry with a new attempt identity.
 

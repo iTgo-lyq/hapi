@@ -9,6 +9,7 @@ import { MachinePathPolicy } from '@/api/machinePathPolicy'
 import { WorkspaceManager } from '../workspaces/manager'
 import { RepositoryCache } from './cache'
 import { RepositoryManager } from './manager'
+import { WorkspaceError } from '../workspaces/git'
 
 const roots: string[] = [], repositories: RepositoryManager[] = [], workspaces: WorkspaceManager[] = []
 const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_LFS_SKIP_SMUDGE: '1' }
@@ -19,10 +20,11 @@ function init(path: string, format = 'sha1') {
     return path
 }
 function commit(path: string) { git(path, 'add', '-A'); git(path, 'commit', '-qm', 'baseline'); return git(path, 'rev-parse', 'HEAD') }
-function machine(home: string, machineId: string) {
+function machine(home: string, machineId: string, assertStopped: (id: string) => Promise<void> = async () => { throw new Error('No execution was started') }) {
     const pathPolicy = new MachinePathPolicy(), cache = new RepositoryCache({ home, machineId, scope: 'test-namespace', pathPolicy })
-    const workspace = new WorkspaceManager({ home, machineId, pathPolicy, snapshots: cache, assertStopped: async () => { throw new Error('No execution was started') } })
+    const workspace = new WorkspaceManager({ home, machineId, pathPolicy, snapshots: cache, assertStopped })
     const manager = new RepositoryManager({ home, pathPolicy, cache, resolveSource: (...args) => workspace.resolveSource(...args),
+        repositoryWorkspaces: commonDir => workspace.repositoryRecords(commonDir),
         withRepositoryLock: (key, action) => workspace.withRepositoryLock(key, action) })
     repositories.push(manager); workspaces.push(workspace)
     return { manager, workspace, cache }
@@ -91,7 +93,7 @@ describe('repository cache import and worktree preparation', () => {
         const forged = { ...source }; delete forged.snapshot
         expect((await prepare(f.target, forged)).operation.error?.code).toBe('repository_snapshot_required')
         expect((await prepare(f.target, { ...source, snapshot: { ...source.snapshot!, manifestId: randomUUID() } })).operation.error?.code).toBe('repository_import_unavailable')
-        await expect(f.target.manager.request({ action: 'release', operationId: transfer.request.operationId })).rejects.toMatchObject({ code: 'repository_cache_retained' })
+        await expect(f.target.manager.request({ action: 'release', operationId: transfer.request.operationId })).rejects.toMatchObject({ code: 'repository_cache_in_use' })
     }, 30_000)
 
     it('hydrates nested modules with repeated names and LFS without source URLs, and rejects launch drift', async () => {
@@ -182,6 +184,92 @@ describe('repository cache import and worktree preparation', () => {
         expect(await restarted.manager.request(transfer.request)).toEqual({ operation: stopped })
         expect(existsSync(restarted.cache.commonDir(transfer.request.snapshot))).toBe(false)
     })
+
+    it('releases imports independently and removes a shared cache only after all unchanged worktrees are removed', async () => {
+        const f = fixture(), transfer = await exported(f), a = await imported(f.target, transfer.request)
+        const b = await imported(f.target, { ...transfer.request, operationId: randomUUID() })
+        const first = await prepare(f.target, a.imported!.source), second = await prepare(f.target, a.imported!.source)
+        await expect(f.target.manager.request({ action: 'release', operationId: a.request.operationId })).rejects.toMatchObject({ code: 'repository_cache_in_use' })
+        for (const item of [first, second]) {
+            await f.target.workspace.request({ action: 'finalize', ...item.reference, roundId: item.roundId, attemptId: randomUUID(), unchangedHead: a.snapshot!.baseCommit })
+            await f.target.workspace.settled()
+            const sealed = await f.target.workspace.inspect(item.reference.environmentId)
+            expect(sealed.results[item.roundId]?.resultHead).toBe(a.snapshot!.baseCommit)
+            await f.target.workspace.request({ action: 'remove', environmentId: item.reference.environmentId, attemptId: randomUUID(), expectedHead: a.snapshot!.baseCommit })
+            await f.target.workspace.settled()
+            expect((await f.target.workspace.inspect(item.reference.environmentId)).status).toBe('removed')
+        }
+        const released = await f.target.manager.request({ action: 'release', operationId: a.request.operationId })
+        expect('operation' in released && released.operation).toMatchObject({ retention: 'released', cache: { retained: true, reason: { code: 'repository_other_imports' } } })
+        await f.target.cache.validateSource(b.imported!.source)
+        await expect(f.target.cache.validateSource(a.imported!.source)).rejects.toMatchObject({ code: 'repository_import_unavailable' })
+        await f.target.manager.request({ action: 'release', operationId: b.request.operationId })
+        expect(existsSync(dirname(a.imported!.source.commonDir))).toBe(false)
+        expect((await inspect(f.target.manager, a.request.operationId)).retention).toBe('released')
+        await f.target.manager.request({ action: 'release', operationId: b.request.operationId })
+    }, 30_000)
+
+    it('unchanged finalization never checkpoints dirty or newly committed code, and result refs prevent cache deletion', async () => {
+        const f = fixture(), transfer = await exported(f), importedResult = await imported(f.target, transfer.request)
+        const item = await prepare(f.target, importedResult.imported!.source), head = importedResult.snapshot!.baseCommit
+        const finish = async (unchanged = true) => {
+            const attemptId = randomUUID()
+            await f.target.workspace.request({ action: 'finalize', ...item.reference, roundId: item.roundId, attemptId, ...(unchanged ? { unchangedHead: head } : {}) })
+            await f.target.workspace.settled()
+            return (await f.target.workspace.inspect(item.reference.environmentId)).operations[`finalize:${item.roundId}:${attemptId}`]!
+        }
+        writeFileSync(join(item.workspace.cwd, 'note'), 'unique new code')
+        expect((await finish()).error?.code).toBe('workspace_unrecovered_changes')
+        expect(git(item.workspace.cwd, 'rev-parse', 'HEAD')).toBe(head)
+        expect(readFileSync(join(item.workspace.cwd, 'note'), 'utf8')).toBe('unique new code')
+        git(item.workspace.cwd, 'add', '-A'); git(item.workspace.cwd, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'unique result')
+        expect((await finish()).error?.code).toBe('workspace_unrecovered_changes')
+        expect((await finish(false)).status).toBe('succeeded')
+        const sealed = await f.target.workspace.inspect(item.reference.environmentId), result = sealed.results[item.roundId]!
+        await f.target.workspace.request({ action: 'remove', environmentId: item.reference.environmentId, expectedHead: result.resultHead, attemptId: randomUUID() }); await f.target.workspace.settled()
+        expect((await f.target.workspace.inspect(item.reference.environmentId)).status).toBe('removed')
+        await expect(f.target.manager.request({ action: 'release', operationId: transfer.request.operationId })).rejects.toMatchObject({ code: 'repository_results_retained' })
+        expect(git(importedResult.imported!.source.commonDir, 'rev-parse', result.resultRef)).toBe(result.resultHead)
+    }, 30_000)
+
+    it('uses the existing stop proof before unchanged sealing and removal', async () => {
+        const f = fixture(); let stopped = false
+        f.target = machine(join(f.root, 'target-home'), 'target', async () => { if (!stopped) throw new WorkspaceError('workspace_execution_unknown', 'No verified exit') })
+        const transfer = await exported(f), importedResult = await imported(f.target, transfer.request), item = await prepare(f.target, importedResult.imported!.source)
+        await f.target.workspace.launch(item.reference, item.workspace.cwd, 'probe', async () => ({ type: 'success', sessionId: 'probe' }))
+        const attempt = randomUUID(), request = { action: 'finalize', ...item.reference, roundId: item.roundId, sessionId: 'probe', unchangedHead: importedResult.snapshot!.baseCommit }
+        await f.target.workspace.request({ ...request, attemptId: attempt }); await f.target.workspace.settled()
+        expect((await f.target.workspace.inspect(item.reference.environmentId)).operations[`finalize:${item.roundId}:${attempt}`]?.status).toBe('unknown')
+        expect(existsSync(item.workspace.checkout)).toBe(true)
+        stopped = true; await f.target.workspace.inspect(item.reference.environmentId)
+        const retry = randomUUID(); await f.target.workspace.request({ ...request, attemptId: retry }); await f.target.workspace.settled()
+        expect((await f.target.workspace.inspect(item.reference.environmentId)).operations[`finalize:${item.roundId}:${retry}`]?.status).toBe('succeeded')
+    }, 30_000)
+
+    it('retains external worktrees and unknown refs until explicitly repaired', async () => {
+        const f = fixture(), transfer = await exported(f), result = await imported(f.target, transfer.request), cache = result.imported!.source.commonDir
+        const external = join(f.root, 'external'); git(cache, 'worktree', 'add', '--detach', external, result.snapshot!.baseCommit)
+        const release = async () => { const value = await f.target.manager.request({ action: 'release', operationId: transfer.request.operationId }); if (!('operation' in value)) throw new Error('missing receipt'); return value.operation }
+        expect((await release()).cache?.reason?.code).toBe('repository_external_worktree')
+        expect(readFileSync(join(external, 'app/note'), 'utf8')).toBe('baseline')
+        git(cache, 'worktree', 'remove', external); git(cache, 'update-ref', 'refs/heads/manual-code', result.snapshot!.baseCommit)
+        expect((await release()).cache?.reason?.code).toBe('repository_unknown_ref')
+        git(cache, 'update-ref', '-d', 'refs/heads/manual-code')
+        expect((await release()).cache?.retained).toBe(false); expect(existsSync(cache)).toBe(false)
+    }, 30_000)
+
+    it('resumes deletion of the retired cache without deleting a newly imported cache at the same path', async () => {
+        const f = fixture(), transfer = await exported(f), original = await imported(f.target, transfer.request)
+        const directory = join(f.root, 'target-home/workspaces/imports', transfer.request.operationId), retired = join(directory, 'data/released-cache')
+        mkdirSync(dirname(retired), { recursive: true }); renameSync(dirname(original.imported!.source.commonDir), retired)
+        original.retention = 'releasing'; writeFileSync(join(directory, 'operation.json'), JSON.stringify(original))
+        const recreated = await imported(f.target, { ...transfer.request, operationId: randomUUID() })
+        const item = await prepare(f.target, recreated.imported!.source)
+        const restarted = machine(join(f.root, 'target-home'), 'target')
+        await restarted.manager.request({ action: 'release', operationId: original.request.operationId })
+        expect(existsSync(retired)).toBe(false); expect(existsSync(recreated.imported!.source.commonDir)).toBe(true)
+        await restarted.workspace.validatePrepared(item.reference, item.workspace.cwd)
+    }, 30_000)
 })
 
 function sourceCache(result: RepositoryOperation) { return result.imported!.source.commonDir }

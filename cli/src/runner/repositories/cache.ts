@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
-import { createReadStream, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { mkdir, rm } from 'node:fs/promises'
+import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { mkdir, rename, rm } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { RepositorySnapshotSchema, type RepositoryImport, type RepositoryImportRequest, type RepositoryOperation,
+import { RepositorySnapshotSchema, type ManagedWorkspace, type RepositoryImport, type RepositoryImportRequest, type RepositoryOperation,
     type RepositorySnapshot, type WorkspaceSource } from '@hapi/protocol'
 import type { MachinePathPolicy } from '@/api/machinePathPolicy'
 import { captureFile } from '../artifacts/outputs'
@@ -159,6 +159,62 @@ export class RepositoryCache {
         }
         if (source.relativePath && await output(source.commonDir, ['cat-file', '-t', `${source.baseCommit}:${source.relativePath}`], { env: repositoryReadEnvironment }) !== 'tree') return fail('workspace_cwd_missing', 'Source subdirectory is absent from the snapshot.')
         return { snapshot, imported: receipt.imported }
+    }
+    async release(record: RepositoryOperation, imports: RepositoryOperation[], workspaces: ManagedWorkspace[], retired: string, options: GitOptions,
+        begin: () => void): Promise<NonNullable<RepositoryOperation['cache']>> {
+        if (record.request.action !== 'import') return fail('repository_import_required', 'Only imports own repository cache references.')
+        const snapshot = record.request.snapshot, directory = this.location(snapshot)
+        const pending = (workspace: ManagedWorkspace) => Object.values(workspace.operations).some(op => ['accepted', 'running', 'unknown'].includes(op.status))
+        const changed = (workspace: ManagedWorkspace) => Object.values(workspace.results).some(result => result.resultHead !== workspace.source.baseCommit)
+        const owned = workspaces.filter(workspace => workspace.source.snapshot?.importOperationId === record.request.operationId)
+        for (const workspace of owned) {
+            if (workspace.status !== 'removed' || pending(workspace)) return fail('repository_cache_in_use', 'An environment still retains this import.', workspace.environmentId)
+            if (changed(workspace)) return fail('repository_results_retained', 'This import protects code results that have not been released.', workspace.environmentId)
+        }
+        const related = imports.filter(item => item.request.action === 'import' && this.location(item.request.snapshot) === directory)
+        const keep = (code: string, message: string, hint?: string) => ({ retained: true, directory, reason: { code, message, ...(hint ? { hint } : {}) } })
+        begin()
+        if (!existsSync(directory)) return { retained: false, directory }
+        await this.owned(directory)
+        if (!same(JSON.parse(readFileSync(join(directory, 'owner.json'), 'utf8')),
+            { scope: hash(this.options.scope), sourceMachineId: snapshot.sourceMachineId, repositoryId: snapshot.repositoryId })) return fail('repository_ownership_changed', 'Cache ownership changed; it was retained.')
+        const holders = related.filter(item => item.request.operationId !== record.request.operationId && item.retention !== 'released')
+        if (holders.length) return keep('repository_other_imports', `${holders.length} other imports retain the shared cache.`, holders.map(item => item.request.operationId).join(', '))
+        if (workspaces.some(workspace => workspace.status !== 'removed' || pending(workspace) || changed(workspace))) return keep('repository_retained_workspaces', 'Other environments or code results still retain this cache.')
+        // Public remove intentionally keeps refs. Only unchanged, removed environments can be discarded here.
+        const expected = new Map<string, Map<string, Set<string>>>()
+        const allow = (repo: string, name: string, commit: string) => {
+            if (!expected.has(repo)) expected.set(repo, new Map())
+            const refs = expected.get(repo)!; if (!refs.has(name)) refs.set(name, new Set()); refs.get(name)!.add(commit)
+        }
+        for (const item of related) if (item.request.action === 'import') {
+            for (const [index, repo] of this.mapping(item.request.snapshot).entries()) {
+                const commit = item.request.snapshot.repositories[index]!.commit
+                allow(repo.directory, repo.ref, commit); allow(repo.directory, 'refs/heads/cache-base', commit)
+            }
+        }
+        for (const workspace of workspaces) {
+            allow(this.commonDir(snapshot), `refs/hapi/workspaces/${workspace.environmentId}/base`, workspace.source.baseCommit)
+            for (const result of Object.values(workspace.results)) allow(this.commonDir(snapshot), result.resultRef, result.resultHead)
+        }
+        const opts = { ...options, env: { ...options.env, ...repositoryReadEnvironment } }
+        for (const name of readdirSync(directory)) {
+            if (name === 'owner.json') continue
+            const repo = join(directory, name), refs = expected.get(repo)
+            if (!refs) return keep('repository_unknown_assets', 'An unrecognized cache entry was retained.', name)
+            await this.owned(repo)
+            const trees = (await output(repo, ['worktree', 'list', '--porcelain'], opts)).split('\n').filter(line => line.startsWith('worktree ')).map(line => line.slice(9))
+            if (trees.some(path => path !== repo)) return keep('repository_external_worktree', 'Git still has a worktree using this cache.', repo)
+            for (const line of (await output(repo, ['for-each-ref', '--format=%(refname) %(objectname)'], opts)).split('\n').filter(Boolean)) {
+                const [name, commit] = line.split(' ')
+                if (!refs.get(name!)?.has(commit!)) return keep('repository_unknown_ref', 'A ref contains unrecognized or unrecovered code; the cache was retained.', line)
+            }
+        }
+        // Move the checked cache out of the shared location atomically. A later import may recreate
+        // that location while interrupted deletion resumes only inside this operation's data directory.
+        await mkdir(dirname(retired), { recursive: true, mode: 0o700 }); await this.owned(dirname(retired))
+        await rename(directory, retired)
+        return { retained: false, directory }
     }
     async hydrate(source: WorkspaceSource, checkout: string, options: GitOptions, verifyOnly = false) {
         const { snapshot, imported } = await this.validateSource(source)

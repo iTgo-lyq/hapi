@@ -43,5 +43,6 @@ export type RepositoryOperation = {
     retention: 'retained' | 'releasing' | 'released'; releasedFiles: string[];
     createdAt: number; updatedAt: number; snapshot?: RepositorySnapshot; imported?: RepositoryImport; error?: WorkspaceProblem;
     process?: { pid: number; marker: string | null };
+    cache?: { retained: boolean; directory: string; reason?: WorkspaceProblem };
 }
 export type RepositoryResponse = { operation: RepositoryOperation } | { error: WorkspaceProblem }

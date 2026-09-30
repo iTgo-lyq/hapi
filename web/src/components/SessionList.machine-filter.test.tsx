@@ -86,6 +86,7 @@ const multiMachineSessions = [
 describe('SessionList machine filter', () => {
     beforeEach(() => {
         window.localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
     })
 
     it('hides the filter bar when all sessions are on a single machine', () => {

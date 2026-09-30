@@ -11,11 +11,7 @@ function renderCard(options: {
     locale?: 'en' | 'zh-CN'
     getGeneratedImageBlob?: ReturnType<typeof vi.fn>
 }) {
-    if (options.locale) {
-        localStorage.setItem('hapi-lang', options.locale)
-    } else {
-        localStorage.removeItem('hapi-lang')
-    }
+    localStorage.setItem('hapi-lang', options.locale ?? 'en')
 
     const getGeneratedImageBlob = options.getGeneratedImageBlob ?? vi.fn(async () => new Blob(['x'], { type: options.mimeType ?? 'image/png' }))
     const api = { getGeneratedImageBlob } as unknown as ApiClient

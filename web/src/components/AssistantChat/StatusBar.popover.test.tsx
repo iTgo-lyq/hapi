@@ -6,6 +6,7 @@ import { StatusBar } from './StatusBar'
 describe('StatusBar context details popover', () => {
     beforeEach(() => {
         localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
     })
 
     it('keeps stable connection labels in English and offsets the whole left status', () => {

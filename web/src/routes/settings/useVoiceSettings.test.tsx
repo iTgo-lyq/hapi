@@ -32,6 +32,7 @@ describe('useVoiceSettings', () => {
     beforeEach(() => {
         vi.clearAllMocks()
         localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
         vi.stubGlobal('navigator', {
             userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/140.0 Safari/537.36',
             userAgentData: { platform: 'macOS', mobile: false },

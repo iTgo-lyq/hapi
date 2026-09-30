@@ -8,6 +8,7 @@ afterEach(() => cleanup())
 describe('DiffView', () => {
     beforeEach(() => {
         window.localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
     })
 
     it('counts blank-line additions and removals in diff stats', () => {

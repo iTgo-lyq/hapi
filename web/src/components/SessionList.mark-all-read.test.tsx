@@ -65,6 +65,7 @@ function renderSessionList(sessions: SessionSummary[]) {
 describe('SessionList mark all as read', () => {
     beforeEach(() => {
         localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
     })
 
     it('only shows the independent action when unread sessions exist', () => {

@@ -10,6 +10,7 @@ import { resolveSessionHeaderMachineLabel, SessionHeader } from './SessionHeader
 afterEach(() => {
     cleanup()
     localStorage.clear()
+    localStorage.setItem('hapi-lang', 'en')
 })
 
 function ToastMessages() {

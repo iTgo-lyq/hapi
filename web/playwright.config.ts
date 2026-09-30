@@ -12,6 +12,7 @@ export default defineConfig({
     use: {
         ...devices['Desktop Chrome'],
         baseURL: 'http://127.0.0.1:5173',
+        storageState: { cookies: [], origins: [{ origin: 'http://127.0.0.1:5173', localStorage: [{ name: 'hapi-lang', value: 'en' }] }] },
         viewport: { width: 1440, height: 900 },
         ...(chromePath
             ? {

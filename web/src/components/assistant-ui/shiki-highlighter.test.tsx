@@ -26,6 +26,7 @@ afterEach(() => cleanup())
 describe('SyntaxHighlighter wrap toggle', () => {
     beforeEach(() => {
         window.localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
     })
 
     it('renders the code inside a <pre> element for preformatted semantics', () => {

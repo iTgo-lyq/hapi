@@ -19,6 +19,7 @@ const Pre = defaultComponents.pre as ComponentType<{ children: string }>
 describe('markdown-text CodeHeader + Pre wrap toggle', () => {
     beforeEach(() => {
         window.localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
     })
 
     it('defaults to wrap off: Pre keeps the horizontal-scroll wrapper and w-max pre', () => {

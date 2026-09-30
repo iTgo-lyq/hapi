@@ -115,6 +115,7 @@ describe('FilesPage search navigation', () => {
         mocks.sessionId = 'session-1'
         mocks.search = { tab: 'directories', query: '感' }
         window.localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
         window.sessionStorage.clear()
     })
 
@@ -178,6 +179,7 @@ describe('FilesPage tab preference', () => {
         mocks.sessionHeaderProps = null
         mocks.search = {}
         window.localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
         window.sessionStorage.clear()
     })
 
@@ -229,6 +231,7 @@ describe('FilesPage reopen draft transfer', () => {
         mocks.sessionHeaderProps = null
         mocks.search = { tab: 'directories', query: '感' }
         window.localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
         window.sessionStorage.clear()
     })
 
@@ -269,6 +272,7 @@ describe('FilesPage file context menu', () => {
         mocks.sessionId = 'session-1'
         mocks.search = { tab: 'directories', query: '感' }
         window.localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
         window.sessionStorage.clear()
         clearDraft('session-1')
     })
@@ -331,6 +335,7 @@ describe('FilesPage changes-row context menu', () => {
             refetch: vi.fn(),
         }
         window.localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
         window.sessionStorage.clear()
         clearDraft('session-1')
     })

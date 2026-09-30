@@ -109,6 +109,7 @@ describe('RunnerVersionSkewBanner', () => {
     afterEach(() => {
         cleanup()
         vi.clearAllMocks()
+        vi.restoreAllMocks()
     })
 
     it('renders a compact banner with minimize and snooze actions', () => {

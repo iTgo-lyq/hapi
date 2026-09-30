@@ -12,6 +12,7 @@ afterEach(() => cleanup())
 describe('CodeBlock', () => {
     beforeEach(() => {
         window.localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
     })
 
     it('renders a header label and truncation badge for long content', () => {

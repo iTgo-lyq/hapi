@@ -79,6 +79,7 @@ describe('FilePage markdown preview', () => {
     beforeEach(() => {
         vi.clearAllMocks()
         window.localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
         window.sessionStorage.clear()
     })
 

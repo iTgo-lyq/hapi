@@ -16,6 +16,7 @@ export default defineConfig({
     reporter: process.env.CI ? [['list'], ['html', { open: 'never' }]] : 'list',
     use: {
         baseURL: BASE_URL,
+        storageState: { cookies: [], origins: [{ origin: BASE_URL, localStorage: [{ name: 'hapi-lang', value: 'en' }] }] },
         trace: 'retain-on-failure',
         screenshot: 'only-on-failure',
     },

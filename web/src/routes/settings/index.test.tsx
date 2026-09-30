@@ -221,6 +221,7 @@ describe('responsive settings pages', () => {
     beforeEach(() => {
         vi.clearAllMocks()
         localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
         getHubSettings.mockResolvedValue({ sessionSummaryContract: false, sessionSummaryInChat: false })
         updateHubSettings.mockResolvedValue({ sessionSummaryContract: true, sessionSummaryInChat: false })
         context.token = `x.${btoa(JSON.stringify({ ns: 'default' }))}.x`

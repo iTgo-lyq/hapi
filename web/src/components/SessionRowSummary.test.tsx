@@ -44,6 +44,7 @@ function renderSummary(showDetailedStatus: boolean) {
 describe('SessionRowSummary background status', () => {
     beforeEach(() => {
         localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
     })
 
     it('shows the basic running label in Basic mode', () => {

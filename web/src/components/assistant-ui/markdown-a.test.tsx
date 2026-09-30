@@ -70,6 +70,7 @@ const OPEN_NEW_TAB_STORAGE_KEY = 'hapi-open-external-links-in-new-tab'
 
 beforeEach(() => {
     localStorage.clear()
+    localStorage.setItem('hapi-lang', 'en')
     cleanup()
     vi.clearAllMocks()
 })
@@ -482,6 +483,7 @@ describe('markdown <A> component — open external links in new tab setting', ()
 describe('intra-tab cross-provider sync (schemeListeners emitter)', () => {
     it('allowing a scheme in one UriConfirmProvider propagates to a sibling provider', async () => {
         localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
 
         // Suppress window.open — handleAlwaysAllow calls it after allow()
         const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)

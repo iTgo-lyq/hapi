@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
-import { afterEach } from 'vitest'
+import { afterEach, beforeEach } from 'vitest'
 
 afterEach(() => {
     cleanup()
@@ -52,6 +52,11 @@ try {
 } catch {
     installMemoryLocalStorage()
 }
+
+// English UI assertions use an explicit preference, independent of the product default.
+beforeEach(() => {
+    localStorage.setItem('hapi-lang', 'en')
+})
 
 if (!('IntersectionObserver' in globalThis)) {
     class MockIntersectionObserver implements IntersectionObserver {

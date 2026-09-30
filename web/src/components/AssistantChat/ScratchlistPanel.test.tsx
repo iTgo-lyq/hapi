@@ -50,6 +50,7 @@ afterEach(() => {
 
 beforeEach(() => {
     localStorage.clear()
+    localStorage.setItem('hapi-lang', 'en')
 })
 
 describe('ScratchlistPanel', () => {

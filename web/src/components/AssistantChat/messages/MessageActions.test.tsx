@@ -87,6 +87,7 @@ describe('MessageActions', () => {
         copy.mockReset()
         onShareTurn.mockReset()
         localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
         auiState.thread.isRunning = false
     })
 

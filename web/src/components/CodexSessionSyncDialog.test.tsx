@@ -34,6 +34,7 @@ describe('CodexSessionSyncDialog', () => {
     afterEach(() => {
         cleanup()
         window.localStorage.clear()
+        localStorage.setItem('hapi-lang', 'en')
     })
 
     it('shows the working directory for local Codex sessions', () => {

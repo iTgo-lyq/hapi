@@ -24,9 +24,10 @@ export function startRunnerControlServer({
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const app = fastify({
-      logger: false // We use our own logger
+      logger: false, // We use our own logger
+      forceCloseConnections: true
     });
 
     // Set up Zod type provider
@@ -179,8 +180,9 @@ export function startRunnerControlServer({
           })
         }
       }
-    }, async () => {
+    }, async (_request, reply) => {
       logger.debug('[CONTROL SERVER] Stop runner request received');
+      reply.header('Connection', 'close');
 
       // Give time for response to arrive
       setTimeout(() => {
@@ -194,7 +196,8 @@ export function startRunnerControlServer({
     app.listen({ port: 0, host: '127.0.0.1' }, (err, address) => {
       if (err) {
         logger.debug('[CONTROL SERVER] Failed to start:', err);
-        throw err;
+        reject(err);
+        return;
       }
 
       const port = parseInt(address.split(':').pop()!);

@@ -59,6 +59,7 @@ export class RepositoryManager {
         if (!parsed.success) return fail('repository_request_invalid', 'Invalid repository operation.', parsed.error.issues.map(item => `${item.path.join('.')}: ${item.message}`).join('; '))
         const request = parsed.data
         return this.serial(request.operationId, async () => {
+            if (this.shutdown.signal.aborted) return fail('repository_runner_stopping', 'Runner is stopping; inspect the original operation after reconnecting.')
             if (request.action === 'inspect') {
                 const operation = this.inspect(request.operationId)
                 if (operation.imported && operation.status === 'succeeded' && operation.retention === 'retained') await this.options.cache!.validateSource(operation.imported.source)

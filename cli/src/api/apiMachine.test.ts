@@ -975,3 +975,84 @@ describe('ApiMachineClient connect runner-state advertisement', () => {
         }
     })
 })
+
+describe('ApiMachineClient shutdown', () => {
+    afterEach(() => { vi.useRealTimers(); vi.clearAllMocks() })
+
+    function connectedClient(connected = true) {
+        const handlers = new Map<string, Function>()
+        const emitWithAck = vi.fn().mockResolvedValue({ result: 'success', version: 1, runnerState: { status: 'shutting-down' } })
+        const socket = { connected, on: vi.fn((name: string, handler: Function) => { handlers.set(name, handler) }),
+            emit: vi.fn(), emitWithAck, timeout: vi.fn((_ms: number) => ({ emitWithAck })), close: vi.fn() }
+        ioMock.mockReturnValue(socket)
+        const machine = makeMachine('shutdown-machine'), client = new ApiMachineClient('cli-token', machine)
+        client.connect()
+        return { client, machine, socket, handlers }
+    }
+
+    it('sends exactly one 500ms versioned notification without updating local state', async () => {
+        const { client, machine, socket } = connectedClient()
+        client.beginShutdown(); await client.notifyShutdown('os-signal')
+        expect(socket.timeout).toHaveBeenCalledExactlyOnceWith(500)
+        expect(socket.emitWithAck).toHaveBeenCalledExactlyOnceWith('machine-update-state', expect.objectContaining({
+            expectedVersion: 0, runnerState: expect.objectContaining({ status: 'shutting-down', shutdownSource: 'os-signal' }),
+        }))
+        expect(machine.runnerStateVersion).toBe(0)
+        client.shutdown()
+    })
+
+    it('skips disconnected sockets without queueing a notice', async () => {
+        const { client, socket } = connectedClient(false)
+        client.beginShutdown(); await client.notifyShutdown('hapi-cli')
+        expect(socket.emitWithAck).not.toHaveBeenCalled()
+        client.shutdown()
+    })
+
+    it.each([{ result: 'error' }, { result: 'version-mismatch', version: 7 }, undefined])('does not retry a rejected notice: %j', async answer => {
+        const { client, socket } = connectedClient()
+        socket.emitWithAck.mockResolvedValue(answer)
+        client.beginShutdown()
+        await expect(client.notifyShutdown('hapi-cli')).rejects.toThrow('not acknowledged')
+        expect(socket.emitWithAck).toHaveBeenCalledOnce()
+        client.shutdown()
+    })
+
+    it('bounds an unacknowledged notice', async () => {
+        vi.useFakeTimers()
+        const { client, socket } = connectedClient()
+        socket.timeout.mockImplementation(ms => ({ emitWithAck: vi.fn(() => new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))) }))
+        client.beginShutdown()
+        const notice = expect(client.notifyShutdown('hapi-cli')).rejects.toThrow('timeout')
+        await vi.advanceTimersByTimeAsync(500); await notice
+        expect(socket.timeout).toHaveBeenCalledOnce()
+        client.shutdown()
+    })
+
+    it('cancels an outstanding ACK, ignores late state, and rejects further updates', async () => {
+        const { client, machine, socket } = connectedClient()
+        let acknowledge!: (value: unknown) => void
+        socket.emitWithAck.mockImplementation(() => new Promise(resolve => { acknowledge = resolve }))
+        const update = client.updateRunnerState(() => ({ status: 'running' }))
+        const rejected = expect(update).rejects.toThrow('Runner is shutting down')
+        client.beginShutdown(); await rejected
+        acknowledge({ result: 'success', version: 42, runnerState: { status: 'running' } })
+        await Promise.resolve(); await Promise.resolve()
+        expect(machine.runnerState).toBeNull(); expect(machine.runnerStateVersion).toBe(0)
+        await expect(client.updateMachineMetadata(() => ({ workspaceRoots: ['/tmp'] } as any))).rejects.toThrow('Runner is shutting down')
+        expect(socket.emitWithAck).toHaveBeenCalledOnce()
+        client.shutdown()
+    })
+
+    it('does not accept RPCs or restart keepalive/update work after stopping', async () => {
+        const { client, socket, handlers } = connectedClient()
+        const reply = vi.fn()
+        client.beginShutdown()
+        await handlers.get('rpc-request')!({ method: 'shutdown-machine:spawn-happy', params: '{}' }, reply)
+        expect(JSON.parse(reply.mock.calls[0][0])).toMatchObject({ type: 'error', childStarted: false })
+        handlers.get('connect')!()
+        handlers.get('update')!({ body: { t: 'update-machine', machineId: 'shutdown-machine', runnerState: { version: 22, value: { status: 'running' } } } })
+        expect(socket.emitWithAck).not.toHaveBeenCalled()
+        expect(socket.emit).not.toHaveBeenCalled()
+        client.shutdown()
+    })
+})

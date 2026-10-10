@@ -150,6 +150,7 @@ export class WorkspaceManager {
         const key = request.action === 'prepare' ? request.source.commonDir : this.read(request.environmentId).source.commonDir
         // Accept only; never hold the HTTP/RPC call open for clone, LFS or hooks.
         return this.serial(`accept:${request.environmentId}`, async () => {
+            if (this.shutdown.signal.aborted) return problem('workspace_runner_stopping', 'Runner is stopping; inspect the original environment after reconnecting.')
             if (this.launching.has(request.environmentId)) return problem('workspace_execution_starting', 'A workspace execution is starting.')
             let workspace: ManagedWorkspace
             if (existsSync(this.recordPath(request.environmentId))) workspace = this.read(request.environmentId)

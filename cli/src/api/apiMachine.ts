@@ -30,7 +30,8 @@ import { workspaceProblem } from '@/runner/workspaces/git'
 import type { RunnerState, Machine, MachineMetadata } from './types'
 import { RunnerStateSchema, MachineMetadataSchema } from './types'
 import { getInstalledCliMtimeMs } from '@/runner/controlClient'
-import { backoff } from '@/utils/time'
+import { createBackoff } from '@/utils/time'
+import { RUNNER_SHUTDOWN_NOTICE_MS } from '@/runner/shutdown'
 import { getInvokedCwd } from '@/utils/invokedCwd'
 import { RpcHandlerManager } from './rpc/RpcHandlerManager'
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers'
@@ -115,6 +116,8 @@ function formatWorkspaceRoots(paths?: string[]): string {
 }
 
 export class ApiMachineClient {
+    private readonly stopped = new AbortController()
+    private readonly retryUpdate = createBackoff({ signal: this.stopped.signal })
     private socket!: Socket<ServerToClientEvents, ClientToServerEvents>
     private keepAliveInterval: NodeJS.Timeout | null = null
     private keepAliveStartTimeout: ReturnType<typeof setTimeout> | null = null
@@ -512,7 +515,7 @@ export class ApiMachineClient {
     }
 
     async updateMachineMetadata(handler: (metadata: MachineMetadata | null) => MachineMetadata): Promise<void> {
-        await backoff(async () => {
+        await this.retryUpdate(async () => {
             const updated = handler(this.machine.metadata)
 
             const answer = await this.socket.emitWithAck('machine-update-metadata', {
@@ -520,6 +523,8 @@ export class ApiMachineClient {
                 metadata: updated,
                 expectedVersion: this.machine.metadataVersion
             }) as unknown
+
+            this.stopped.signal.throwIfAborted()
 
             applyVersionedAck(answer, {
                 valueKey: 'metadata',
@@ -545,7 +550,7 @@ export class ApiMachineClient {
     }
 
     async updateRunnerState(handler: (state: RunnerState | null) => RunnerState): Promise<void> {
-        await backoff(async () => {
+        await this.retryUpdate(async () => {
             const updated = handler(this.machine.runnerState)
 
             const answer = await this.socket.emitWithAck('machine-update-state', {
@@ -553,6 +558,8 @@ export class ApiMachineClient {
                 runnerState: updated,
                 expectedVersion: this.machine.runnerStateVersion
             }) as unknown
+
+            this.stopped.signal.throwIfAborted()
 
             applyVersionedAck(answer, {
                 valueKey: 'runnerState',
@@ -593,6 +600,7 @@ export class ApiMachineClient {
         })
 
         this.socket.on('connect', () => {
+            if (this.stopped.signal.aborted) return
             logger.debug('[API MACHINE] Connected to bot')
             this.rpcHandlerManager.onSocketConnect(this.socket)
             this.updateRunnerState((state) => ({
@@ -643,10 +651,15 @@ export class ApiMachineClient {
         })
 
         this.socket.on('rpc-request', async (data: { method: string; params: string }, callback: (response: string) => void) => {
+            if (this.stopped.signal.aborted) {
+                callback(JSON.stringify({ error: 'Runner is shutting down', type: 'error', errorMessage: 'Runner is shutting down', childStarted: false }))
+                return
+            }
             callback(await this.rpcHandlerManager.handleRequest(data))
         })
 
         this.socket.on('update', (data: Update) => {
+            if (this.stopped.signal.aborted) return
             if (data.body.t !== 'update-machine') {
                 return
             }
@@ -733,8 +746,26 @@ export class ApiMachineClient {
         }
     }
 
-    shutdown(): void {
+    beginShutdown(): void {
+        this.stopped.abort(new Error('Runner is shutting down'))
         this.stopKeepAlive()
+    }
+
+    /** One bounded, versioned notification; it must never block local cleanup. */
+    async notifyShutdown(source: string): Promise<void> {
+        if (!this.socket?.connected) return
+        const answer: unknown = await this.socket.timeout(RUNNER_SHUTDOWN_NOTICE_MS).emitWithAck('machine-update-state', {
+            machineId: this.machine.id,
+            runnerState: { ...this.machine.runnerState, status: 'shutting-down', shutdownRequestedAt: Date.now(), shutdownSource: source },
+            expectedVersion: this.machine.runnerStateVersion,
+        })
+        if (!answer || typeof answer !== 'object' || !('result' in answer) || answer.result !== 'success') {
+            throw new Error('Shutdown state notification was not acknowledged')
+        }
+    }
+
+    shutdown(): void {
+        this.beginShutdown()
         // The listener holds this client, and the socket is about to close.
         setAgyCatalogChangeListener(null)
         if (this.socket) {

@@ -1,3 +1,5 @@
+import { setTimeout as abortableDelay } from 'node:timers/promises';
+
 export async function delay(ms: number) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -15,6 +17,7 @@ export function createBackoff(
         minDelay?: number,
         maxDelay?: number,
         maxFailureCount?: number
+        signal?: AbortSignal
     }): BackoffFunc {
     return async <T>(callback: () => Promise<T>): Promise<T> => {
         let currentFailureCount = 0;
@@ -22,9 +25,19 @@ export function createBackoff(
         const maxDelay = opts && opts.maxDelay !== undefined ? opts.maxDelay : 1000;
         const maxFailureCount = opts && opts.maxFailureCount !== undefined ? opts.maxFailureCount : 50;
         while (true) {
+            opts?.signal?.throwIfAborted();
             try {
-                return await callback();
+                if (!opts?.signal) return await callback();
+                const signal = opts.signal;
+                let abort!: () => void;
+                const cancelled = new Promise<never>((_, reject) => {
+                    abort = () => reject(signal.reason);
+                    signal.addEventListener('abort', abort, { once: true });
+                });
+                try { return await Promise.race([callback(), cancelled]); }
+                finally { signal.removeEventListener('abort', abort); }
             } catch (e) {
+                opts?.signal?.throwIfAborted();
                 if (currentFailureCount < maxFailureCount) {
                     currentFailureCount++;
                 }
@@ -32,7 +45,8 @@ export function createBackoff(
                     opts.onError(e, currentFailureCount);
                 }
                 let waitForRequest = exponentialBackoffDelay(currentFailureCount, minDelay, maxDelay, maxFailureCount);
-                await delay(waitForRequest);
+                if (opts?.signal) await abortableDelay(waitForRequest, undefined, { signal: opts.signal });
+                else await delay(waitForRequest);
             }
         }
     };

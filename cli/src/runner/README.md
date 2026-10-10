@@ -76,12 +76,14 @@ Control Flow:
 1. `stopRunner()` in `controlClient.ts` reads runner.state.json and verifies the PID still belongs to a HAPI runner before contacting or signaling it
 2. Attempts graceful shutdown via HTTP POST to `/stop`
 3. Runner receives request, triggers shutdown with source `hapi-cli`
-4. `cleanupAndShutdown()` executes:
-   - Updates backend status to "shutting-down"
-   - Closes WebSocket connection
-   - Stops HTTP server
-   - Deletes runner.state.json
-   - Releases lock file
+4. The runner immediately rejects new RPC/spawn requests and stops heartbeat and update retries.
+   - If connected, sends one "shutting-down" notice with a 500 ms acknowledgement timeout; failure does not prevent local cleanup
+   - Closes WebSocket connection and aborts repository, workspace and artifact operations together
+   - Stops HTTP server, removes its own runner.state.json and releases its own lock
+   - Continues later cleanup steps if an earlier step fails; detached sessions remain alive
+   - Exits 0 after successful local cleanup, including when Hub is unavailable; exceptions or cleanup failures exit 1
+   - An 8 second overall deadline forces exit 1 and logs the unfinished stage; remaining stale state/locks are handled by existing startup recovery
+   - The control client waits up to 10 seconds before falling back to force kill
 5. If HTTP fails, falls back to `killProcess(pid, true)` (uses `taskkill /T /F` on Windows)
 
 ## 2. Multi-Agent Support

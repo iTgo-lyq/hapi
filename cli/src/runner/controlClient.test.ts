@@ -93,3 +93,18 @@ describe('stopRunner identity gate', () => {
         }
     )
 })
+
+describe('stopRunner bounded cleanup wait', () => {
+    afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks() })
+    it('allows cleanup longer than two seconds without force killing', async () => {
+        vi.useFakeTimers()
+        readRunnerStateMock.mockResolvedValue({ pid: 42, httpPort: 3210 })
+        identityMock.mockReturnValue('runner')
+        const start = Date.now()
+        isProcessAliveMock.mockImplementation(() => Date.now() - start < 3500)
+        vi.stubGlobal('fetch', vi.fn(async () => new Response('{"status":"stopping"}', { status: 200 })))
+        const done = stopRunner()
+        await vi.advanceTimersByTimeAsync(3600); await done
+        expect(killProcessMock).not.toHaveBeenCalled()
+    })
+})

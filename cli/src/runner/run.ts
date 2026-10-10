@@ -33,8 +33,9 @@ import { RUNNER_CAPABILITIES } from '@hapi/protocol';
 import { withRetry } from '@/utils/time';
 import { isRetryableConnectionError } from '@/utils/errorUtils';
 
-import { cleanupRunnerState, getInstalledCliMtimeMs, isRunnerRunningCurrentlyInstalledHappyVersion, stopRunner, waitForRunnerHandoff } from './controlClient';
+import { getInstalledCliMtimeMs, isRunnerRunningCurrentlyInstalledHappyVersion, stopRunner, waitForRunnerHandoff } from './controlClient';
 import { startRunnerControlServer } from './controlServer';
+import { createRunnerShutdown, type RunnerCleanup } from './shutdown';
 import { ArtifactTransferManager } from './artifacts/manager';
 import { WorkspaceManager } from './workspaces/manager';
 import { RepositoryManager } from './repositories/manager';
@@ -139,34 +140,9 @@ export function releaseRecoveredSpawnDedupe(
 }
 
 export async function startRunner(options: { workspaceRoots?: string[] } = {}): Promise<void> {
-  // We don't have cleanup function at the time of server construction
-  // Control flow is:
-  // 1. Create promise that will resolve when shutdown is requested
-  // 2. Setup signal handlers to resolve this promise with the source of the shutdown
-  // 3. Once our setup is complete - if all goes well - we await this promise
-  // 4. When it resolves we can cleanup and exit
-  //
-  // In case the setup malfunctions - our signal handlers will not properly
-  // shut down. We will force exit the process with code 1.
-  let requestShutdown: (source: 'hapi-app' | 'hapi-cli' | 'os-signal' | 'exception', errorMessage?: string) => void;
-  let resolvesWhenShutdownRequested = new Promise<({ source: 'hapi-app' | 'hapi-cli' | 'os-signal' | 'exception', errorMessage?: string })>((resolve) => {
-    requestShutdown = (source, errorMessage) => {
-      logger.debug(`[RUNNER RUN] Requesting shutdown (source: ${source}, errorMessage: ${errorMessage})`);
-
-      // Fallback - in case startup malfunctions - we will force exit the process with code 1
-      setTimeout(async () => {
-        logger.debug('[RUNNER RUN] Startup malfunctioned, forcing exit with code 1');
-
-        // Give time for logs to be flushed
-        await new Promise(resolve => setTimeout(resolve, 100))
-
-        process.exit(1);
-      }, 1_000);
-
-      // Start graceful shutdown
-      resolve({ source, errorMessage });
-    };
-  });
+  const resources: RunnerCleanup = {};
+  const shutdown = createRunnerShutdown(resources, message => logger.debug(message));
+  const requestShutdown = shutdown.request;
 
   // Setup signal handlers
   process.on('SIGINT', () => {
@@ -211,81 +187,104 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
   logger.debug('[RUNNER RUN] Starting runner process...');
   logger.debugLargeJson('[RUNNER RUN] Environment', getEnvironmentInfo());
 
-  // Detect authorized handoff from a parent runner doing the
-  // mtime-drift self-restart (see heartbeat block below). The parent sets
-  // HAPI_RUNNER_HANDOFF_FROM_PID=<parent_pid> on the spawned child's env;
-  // if it matches the live state pid, we are the explicit replacement and
-  // must NOT trigger `stopRunner()` (parent will voluntarily release the
-  // lock and exit once it sees our pid in state).
-  //
-  // Codex review #814 [Major] on run.ts:892 -- previously the child
-  // unconditionally called `stopRunner()` before acquiring the lock or
-  // writing its own state. `/stop` resolved the parent's shutdown,
-  // deleted runner.state.json, and released the lock BEFORE the child
-  // had committed itself; if the child then failed (lock contention,
-  // auth error, anything between stopRunner and writeRunnerState), the
-  // machine went offline with no runner at all.
-  //
-  // New protocol:
-  //   - Parent: spawn child with HAPI_RUNNER_HANDOFF_FROM_PID env, then
-  //     release lock, then wait for state.pid to change to a different
-  //     live pid. On wait-timeout the parent re-acquires the lock and
-  //     defers retry; on wait-success the parent clearInterval + exit.
-  //   - Child: detect env, skip stopRunner(), skip the version-match
-  //     early-exit, acquire the lock with a longer retry window (parent
-  //     releases asynchronously, so we may need to wait).
-  const handoffFromPidRaw = process.env.HAPI_RUNNER_HANDOFF_FROM_PID;
-  const handoffFromPid = handoffFromPidRaw ? Number(handoffFromPidRaw) : NaN;
-  let isAuthorizedHandoff = false;
-  if (Number.isFinite(handoffFromPid) && handoffFromPid > 0) {
-    const existingState = await readRunnerState();
-    if (existingState?.pid === handoffFromPid && isProcessAlive(handoffFromPid)) {
-      isAuthorizedHandoff = true;
-      logger.debug(`[RUNNER RUN] Authorized handoff from parent runner PID ${handoffFromPid}; skipping stopRunner() and version-match short-circuit`);
-    } else {
-      logger.debug(`[RUNNER RUN] HAPI_RUNNER_HANDOFF_FROM_PID=${handoffFromPidRaw} set but no matching live parent in state (state.pid=${existingState?.pid ?? 'none'}); ignoring handoff signal`);
-    }
-  }
+  try {
+    shutdown.throwIfStopping();
 
-  if (!isAuthorizedHandoff) {
-    // Check if already running
-    // Check if running runner version matches current CLI version
-    const runningRunnerVersionMatches = await isRunnerRunningCurrentlyInstalledHappyVersion();
-    if (!runningRunnerVersionMatches) {
-      logger.debug('[RUNNER RUN] Runner version mismatch detected, restarting runner with current CLI version');
-      await stopRunner();
-    } else {
-      logger.debug('[RUNNER RUN] Runner version matches, keeping existing runner');
-      console.log('Runner already running with matching version');
+    // Detect authorized handoff from a parent runner doing the
+    // mtime-drift self-restart (see heartbeat block below). The parent sets
+    // HAPI_RUNNER_HANDOFF_FROM_PID=<parent_pid> on the spawned child's env;
+    // if it matches the live state pid, we are the explicit replacement and
+    // must NOT trigger `stopRunner()` (parent will voluntarily release the
+    // lock and exit once it sees our pid in state).
+    //
+    // Codex review #814 [Major] on run.ts:892 -- previously the child
+    // unconditionally called `stopRunner()` before acquiring the lock or
+    // writing its own state. `/stop` resolved the parent's shutdown,
+    // deleted runner.state.json, and released the lock BEFORE the child
+    // had committed itself; if the child then failed (lock contention,
+    // auth error, anything between stopRunner and writeRunnerState), the
+    // machine went offline with no runner at all.
+    //
+    // New protocol:
+    //   - Parent: spawn child with HAPI_RUNNER_HANDOFF_FROM_PID env, then
+    //     release lock, then wait for state.pid to change to a different
+    //     live pid. On wait-timeout the parent re-acquires the lock and
+    //     defers retry; on wait-success the parent clearInterval + exit.
+    //   - Child: detect env, skip stopRunner(), skip the version-match
+    //     early-exit, acquire the lock with a longer retry window (parent
+    //     releases asynchronously, so we may need to wait).
+    const handoffFromPidRaw = process.env.HAPI_RUNNER_HANDOFF_FROM_PID;
+    const handoffFromPid = handoffFromPidRaw ? Number(handoffFromPidRaw) : NaN;
+    let isAuthorizedHandoff = false;
+    if (Number.isFinite(handoffFromPid) && handoffFromPid > 0) {
+      const existingState = await readRunnerState();
+      if (existingState?.pid === handoffFromPid && isProcessAlive(handoffFromPid)) {
+        isAuthorizedHandoff = true;
+        logger.debug(`[RUNNER RUN] Authorized handoff from parent runner PID ${handoffFromPid}; skipping stopRunner() and version-match short-circuit`);
+      } else {
+        logger.debug(`[RUNNER RUN] HAPI_RUNNER_HANDOFF_FROM_PID=${handoffFromPidRaw} set but no matching live parent in state (state.pid=${existingState?.pid ?? 'none'}); ignoring handoff signal`);
+      }
+    }
+
+    if (!isAuthorizedHandoff) {
+      // Check if already running
+      // Check if running runner version matches current CLI version
+      const runningRunnerVersionMatches = await isRunnerRunningCurrentlyInstalledHappyVersion();
+      if (!runningRunnerVersionMatches) {
+        logger.debug('[RUNNER RUN] Runner version mismatch detected, restarting runner with current CLI version');
+        await stopRunner();
+      } else {
+        logger.debug('[RUNNER RUN] Runner version matches, keeping existing runner');
+        console.log('Runner already running with matching version');
+        process.exit(0);
+      }
+    }
+
+    // Acquire exclusive lock (proves runner is running).
+    // In authorized-handoff mode the parent is still alive holding the lock
+    // and will release it asynchronously once we are spawned, so wait longer
+    // (30s) instead of giving up after the standard 1s. Outside handoff,
+    // preserve the original 5x200ms = 1s "already running" semantics.
+    const lockMaxAttempts = isAuthorizedHandoff ? 60 : 5;
+    const lockDelayIncrementMs = isAuthorizedHandoff ? 500 : 200;
+    const initialLockHandle = await acquireRunnerLock(lockMaxAttempts, lockDelayIncrementMs);
+    if (!initialLockHandle) {
+      logger.debug('[RUNNER RUN] Runner lock file already held, another runner is running');
       process.exit(0);
     }
-  }
+    // `let` because the heartbeat-restart handoff path below may release and
+    // re-acquire it. After the null guard above, the initial handle is
+    // non-null; the heartbeat path's failure branches either reassign to a
+    // re-acquired handle or process.exit() before any subsequent release.
+    let runnerLockHandle = initialLockHandle;
+    resources.clearState = async () => {
+      const state = await readRunnerState();
+      if (state?.pid === process.pid) await fs.unlink(configuration.runnerStateFile);
+    };
+    resources.releaseLock = async () => {
+      // A handoff can transfer ownership before this runner finishes stopping.
+      let owner: string;
+      try { owner = (await fs.readFile(configuration.runnerLockFile, 'utf8')).trim(); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        await runnerLockHandle.close();
+        return;
+      }
+      if (owner !== String(process.pid)) { await runnerLockHandle.close(); return; }
+      await releaseRunnerLock(runnerLockHandle);
+      if (existsSync(configuration.runnerLockFile) && readFileSync(configuration.runnerLockFile, 'utf8').trim() === String(process.pid)) {
+        throw new Error('Runner lock could not be removed');
+      }
+    };
 
-  // Acquire exclusive lock (proves runner is running).
-  // In authorized-handoff mode the parent is still alive holding the lock
-  // and will release it asynchronously once we are spawned, so wait longer
-  // (30s) instead of giving up after the standard 1s. Outside handoff,
-  // preserve the original 5x200ms = 1s "already running" semantics.
-  const lockMaxAttempts = isAuthorizedHandoff ? 60 : 5;
-  const lockDelayIncrementMs = isAuthorizedHandoff ? 500 : 200;
-  const initialLockHandle = await acquireRunnerLock(lockMaxAttempts, lockDelayIncrementMs);
-  if (!initialLockHandle) {
-    logger.debug('[RUNNER RUN] Runner lock file already held, another runner is running');
-    process.exit(0);
-  }
-  // `let` because the heartbeat-restart handoff path below may release and
-  // re-acquire it. After the null guard above, the initial handle is
-  // non-null; the heartbeat path's failure branches either reassign to a
-  // re-acquired handle or process.exit() before any subsequent release.
-  let runnerLockHandle = initialLockHandle;
+    // At this point we should be safe to startup the runner:
+    // 1. Not have a stale runner state
+    // 2. Should not have another runner process running
 
-  // At this point we should be safe to startup the runner:
-  // 1. Not have a stale runner state
-  // 2. Should not have another runner process running
-
-  try {
+    shutdown.throwIfStopping();
     // Ensure auth and machine registration BEFORE anything else
     const { machineId } = await authAndSetupMachineIfNeeded();
+    shutdown.throwIfStopping();
     logger.debug('[RUNNER RUN] Auth and machine setup complete');
 
     // Setup state - key by PID
@@ -606,6 +605,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     const workspaces = new WorkspaceManager({
       home: configuration.happyHomeDir, machineId, pathPolicy: new MachinePathPolicy({ workspaceRoots }), assertStopped, snapshots,
     });
+    resources.stopWorkspaces = () => workspaces.stop();
     const repositories = new RepositoryManager({
       cache: snapshots, withRepositoryLock: (key, action) => workspaces.withRepositoryLock(key, action),
       repositoryWorkspaces: commonDir => workspaces.repositoryRecords(commonDir),
@@ -614,12 +614,17 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       home: configuration.happyHomeDir, pathPolicy: new MachinePathPolicy({ workspaceRoots }),
       resolveSource: (cwd, baseRef, options, readDirty) => workspaces.resolveSource(cwd, baseRef, options, readDirty),
     });
+    resources.stopRepositories = () => repositories.stop();
     const artifacts = new ArtifactTransferManager({
       home: configuration.happyHomeDir, url: configuration.apiUrl, token: configuration.cliApiToken, extraHeaders: configuration.extraHeaders,
       pathPolicy: new MachinePathPolicy({ workspaceRoots }), assertStopped,
     });
 
+    resources.stopArtifacts = () => artifacts.stop();
+    const stoppingSpawn: SpawnSessionResult = { type: 'error', errorMessage: 'Runner is shutting down', childStarted: false };
+
     const spawnSessionOnce = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
+      if (shutdown.stopping) return stoppingSpawn;
       logger.debugLargeJson('[RUNNER RUN] Spawning session', options);
 
       const { directory, sessionId, machineId, approvedNewDirectoryCreation = true } = options;
@@ -857,6 +862,11 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         if (options.validatePreparedWorkspace) {
           try { await options.validatePreparedWorkspace(); }
           catch (error) { return { type: 'error', errorMessage: error instanceof Error ? error.message : String(error), code: options.preparedFiles ? 'files_not_prepared' : 'workspace_not_prepared', childStarted: false }; }
+        }
+        if (shutdown.stopping) {
+          await cleanupCopiedCodexConfig('runner shutdown');
+          await maybeCleanupWorktree('runner shutdown');
+          return stoppingSpawn;
         }
         happyProcess = spawnHappyCLI(args, {
           cwd: spawnDirectory,
@@ -1632,6 +1642,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       requestShutdown: () => requestShutdown('hapi-cli'),
       onHappySessionWebhook
     });
+    resources.stopControlServer = stopControlServer;
+    shutdown.throwIfStopping();
 
     // Baseline mtime at runner-process start. Immutable: per Codex review #814
     // [Major], we must NOT refresh this on a failed handoff because the
@@ -1697,6 +1709,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
 
     // Create API client
     const api = await ApiClient.create();
+    shutdown.throwIfStopping();
 
     logger.debug(`[RUNNER RUN] Workspace roots: ${workspaceRoots?.join(', ') ?? '(not set)'}`);
 
@@ -1715,17 +1728,22 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         maxAttempts: 60,
         minDelay: 1000,
         maxDelay: 30000,
-        shouldRetry: isRetryableConnectionError,
+        shouldRetry: error => !shutdown.stopping && isRetryableConnectionError(error),
         onRetry: (error, attempt, nextDelayMs) => {
+          shutdown.throwIfStopping();
           const errorMsg = error instanceof Error ? error.message : String(error)
           logger.debug(`[RUNNER RUN] Failed to register machine (attempt ${attempt}), retrying in ${nextDelayMs}ms: ${errorMsg}`)
         }
       }
     );
+    shutdown.throwIfStopping();
     logger.debug(`[RUNNER RUN] Machine registered: ${machine.id}`);
 
     // Create realtime machine session
     const apiMachine = api.machineSyncClient(machine, { workspaceRoots });
+    resources.stopAccepting = () => apiMachine.beginShutdown();
+    resources.notify = request => apiMachine.notifyShutdown(request.source);
+    resources.disconnect = () => apiMachine.shutdown();
 
     // Set RPC handlers
     apiMachine.setRPCHandlers({
@@ -1808,7 +1826,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     let nextHandoffAttemptAt = 0;
     const HANDOFF_RETRY_BACKOFF_MS = 5 * 60_000;
     const restartOnStaleVersionAndHeartbeat = setInterval(async () => {
-      if (heartbeatRunning) {
+      if (shutdown.stopping || heartbeatRunning) {
         return;
       }
       heartbeatRunning = true;
@@ -1939,13 +1957,17 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
 
           logger.debug(`[RUNNER RUN] Spawned replacement runner with argv: ${JSON.stringify(handoffArgv)}; released lock; waiting for handoff`);
 
+          if (shutdown.stopping) return;
           const handoffOk = await waitForRunnerHandoff(process.pid, { timeoutMs: 30_000 });
+          if (shutdown.stopping) return;
           if (!handoffOk) {
             logger.debug(`[RUNNER RUN] Replacement runner did not register within 30s; attempting to re-acquire lock and stay alive to avoid leaving the machine offline.`);
             // Re-acquire the lock with a long window (the child has likely
             // either succeeded and we're seeing a stale state, or it gave
             // up - in either case the lock should be available shortly).
             const reacquired = await acquireRunnerLock(60, 500);
+            if (reacquired) runnerLockHandle = reacquired;
+            if (shutdown.stopping) return;
             if (!reacquired) {
               // Lock is held by someone else (third-party runner, or a
               // child that succeeded but state file hasn't reflected the
@@ -1973,9 +1995,11 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       // Before wrecklessly overriting the runner state file, we should check if we are the ones who own it
       // Race condition is possible, but thats okay for the time being :D
       const runnerState = await readRunnerState();
+      if (shutdown.stopping) return;
       if (runnerState && runnerState.pid !== process.pid) {
         logger.debug('[RUNNER RUN] Somehow a different runner was started without killing us. We should kill ourselves.')
-        requestShutdown('exception', 'A different runner was started without killing us. We should kill ourselves.')
+        requestShutdown('exception', 'A different runner was started without killing us. We should kill ourselves.');
+        return;
       }
 
       // Heartbeat
@@ -1995,47 +2019,19 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       heartbeatRunning = false;
     }, heartbeatIntervalMs); // Every 60 seconds in production
 
-    // Setup signal handlers
-    const cleanupAndShutdown = async (source: 'hapi-app' | 'hapi-cli' | 'os-signal' | 'exception', errorMessage?: string) => {
-      logger.debug(`[RUNNER RUN] Starting proper cleanup (source: ${source}, errorMessage: ${errorMessage})...`);
-
-      // Clear health check interval
-      if (restartOnStaleVersionAndHeartbeat) {
-        clearInterval(restartOnStaleVersionAndHeartbeat);
-        logger.debug('[RUNNER RUN] Health check interval cleared');
-      }
-
-      // Update runner state before shutting down
-      await apiMachine.updateRunnerState((state: RunnerState | null) => ({
-        ...state,
-        status: 'shutting-down',
-        shutdownRequestedAt: Date.now(),
-        shutdownSource: source
-      }));
-
-      // Give time for metadata update to send
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      apiMachine.shutdown();
-      await repositories.stop();
-      await workspaces.stop();
-      await artifacts.stop();
-      await stopControlServer();
-      await cleanupRunnerState();
-      await releaseRunnerLock(runnerLockHandle);
-
-      logger.debug('[RUNNER RUN] Cleanup completed, exiting process');
-      process.exit(0);
-    };
+    resources.stopHeartbeat = () => clearInterval(restartOnStaleVersionAndHeartbeat);
 
     logger.debug('[RUNNER RUN] Runner started successfully, waiting for shutdown request');
 
     // Wait for shutdown request
-    const shutdownRequest = await resolvesWhenShutdownRequested;
-    await cleanupAndShutdown(shutdownRequest.source, shutdownRequest.errorMessage);
+    await shutdown.wait;
+    await shutdown.finish();
   } catch (error) {
-    logger.debug('[RUNNER RUN][FATAL] Failed somewhere unexpectedly - exiting with code 1', error);
-    process.exit(1);
+    if (!shutdown.stopping) {
+      logger.debug('[RUNNER RUN][FATAL] Failed during runner startup', error);
+      requestShutdown('exception', error instanceof Error ? error.message : String(error));
+    }
+    await shutdown.finish();
   }
 }
 

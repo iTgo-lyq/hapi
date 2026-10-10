@@ -270,6 +270,17 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
     await waitFor(async () => !existsSync(configuration.runnerStateFile), 1000);
   });
 
+  it('keeps detached sessions alive after runner shutdown', async () => {
+    const result = await spawnTrackedSession('/tmp', 'detached-retention');
+    const child = (await listRunnerSessions()).find(session => session.happySessionId === result.sessionId);
+    expect(child).toBeDefined();
+    expect(isProcessAlive(child!.pid)).toBe(true);
+    await stopRunnerHttp();
+    await waitFor(async () => !existsSync(configuration.runnerStateFile), 2000);
+    expect(isProcessAlive(child!.pid)).toBe(true);
+    // The existing owned-process registry reaps this session after the assertion.
+  });
+
   it('should track both runner-spawned and terminal sessions', async () => {
     // Spawn a real hapi process that looks like it was started from terminal
     const terminalHappyProcess = spawnHappyCLI([

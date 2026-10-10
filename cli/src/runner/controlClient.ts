@@ -13,6 +13,7 @@ import { isBunCompiled, projectPath } from '@/projectPath';
 import { isProcessAlive, getHapiRunnerProcessIdentity, killProcess } from '@/utils/process';
 import { configuration } from '@/configuration';
 import { hashRunnerCliApiToken, hashRunnerExtraHeaders, isRunnerStateCompatibleWithIdentity } from './runnerIdentity';
+import { RUNNER_STOP_WAIT_MS } from './shutdown';
 
 export function getInstalledCliMtimeMs(): number | undefined {
   if (isBunCompiled()) {
@@ -108,8 +109,8 @@ export async function spawnRunnerSession(directory: string, sessionId?: string):
   return result;
 }
 
-export async function stopRunnerHttp(): Promise<void> {
-  await runnerPost('/stop');
+export async function stopRunnerHttp(): Promise<{ error?: string; status?: string }> {
+  return await runnerPost('/stop');
 }
 
 /**
@@ -309,10 +310,11 @@ export async function stopRunner() {
 
     // Try HTTP graceful stop
     try {
-      await stopRunnerHttp();
+      const response = await stopRunnerHttp();
+      if (response?.error || response?.status !== 'stopping') throw new Error('Runner did not acknowledge the stop request');
 
       // Wait for runner to die
-      await waitForProcessDeath(state.pid, 2000);
+      await waitForProcessDeath(state.pid, RUNNER_STOP_WAIT_MS);
       logger.debug('Runner stopped gracefully via HTTP');
       return;
     } catch (error) {

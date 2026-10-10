@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { getProjectPath } from './path';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 vi.mock('node:os', () => ({
     homedir: vi.fn(() => '/home/user')
@@ -63,6 +63,42 @@ describe('getProjectPath', () => {
         const workingDir = '';
         const result = getProjectPath(workingDir);
         expect(result).toContain(join('/home/user', '.claude', 'projects'));
+    });
+
+    // Fixed vectors independently checked against Claude Code 2.1.283's
+    // UTF-16 / signed int32 path hash. Keep the expected suffixes literal.
+    it.skipIf(process.platform === 'win32')('matches a directory actually created by Claude Code 2.1.283', () => {
+        const root = '/home/tiger/workspace/runweft/.dev-smoke/hapi-session-and-shutdown/path-probe';
+        const cwd = `${root}/${'a'.repeat(110)}/${'b'.repeat(110)}`;
+        expect(basename(getProjectPath(cwd))).toBe(
+            `-home-tiger-workspace-runweft--dev-smoke-hapi-session-and-shutdown-path-probe-${'a'.repeat(110)}-${'b'.repeat(11)}-77odt8`
+        );
+    });
+    it.skipIf(process.platform === 'win32')('keeps exactly 200 encoded code units and truncates at 201', () => {
+        const prefix = `${resolve('/')}${'a'.repeat(199)}`;
+        expect(basename(getProjectPath(prefix))).toBe(`-${'a'.repeat(199)}`);
+        expect(basename(getProjectPath(`${prefix}a`))).toBe(`-${'a'.repeat(199)}-b6ymvl`);
+    });
+
+    it.skipIf(process.platform === 'win32')('hashes the full unencoded path and separates identical truncated prefixes', () => {
+        const prefix = `/${'a'.repeat(199)}`;
+        expect(basename(getProjectPath(`${prefix}/one`))).toBe(`-${'a'.repeat(199)}-rr6fnt`);
+        expect(basename(getProjectPath(`${prefix}/two`))).toBe(`-${'a'.repeat(199)}-rr6jlb`);
+        expect(getProjectPath(`${prefix}/one/`)).toBe(getProjectPath(`${prefix}/one`));
+    });
+
+    it.skipIf(process.platform === 'win32')('uses UTF-16 code units for BMP text and astral characters across the boundary', () => {
+        expect(basename(getProjectPath(`/${'界'.repeat(200)}`))).toBe(`${'-'.repeat(200)}-blobf5`);
+        expect(basename(getProjectPath(`/${'a'.repeat(199)}😀`))).toBe(`-${'a'.repeat(199)}-86sic5`);
+        expect(basename(getProjectPath('/😀'))).toBe('---');
+    });
+
+    it('resolves relative long paths before encoding and respects the configured history root', () => {
+        process.env.CLAUDE_CONFIG_DIR = '/dedicated/claude';
+        const cwd = `./${'a'.repeat(110)}/${'b'.repeat(110)}`;
+        expect(getProjectPath(cwd)).toBe(getProjectPath(resolve(cwd)));
+        expect(getProjectPath(cwd).startsWith(join('/dedicated/claude', 'projects'))).toBe(true);
+        expect(basename(getProjectPath(cwd))).toMatch(/^.{200}-[a-z0-9]+$/);
     });
 
     describe('CLAUDE_CONFIG_DIR support', () => {

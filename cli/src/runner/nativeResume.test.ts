@@ -14,10 +14,26 @@ vi.mock('@/codex/codexAppServerClient', async () => ({
 }));
 import { CodexRpcError } from '@/codex/codexAppServerClient';
 import { checkNativeResume, NativeSessionMissingError } from './nativeResume';
+import { join } from 'node:path';
 const id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
 beforeEach(() => { vi.resetAllMocks(); mocks.stat.mockResolvedValue({ isFile: () => true }); });
 describe('native resume preflight', () => {
+    it.skipIf(process.platform === 'win32')('finds the precise long-path transcript and preserves long-path IO errors', async () => {
+        vi.stubEnv('CLAUDE_CONFIG_DIR', '/dedicated/claude');
+        try {
+            const prefix = `/${'a'.repeat(199)}`;
+            await checkNativeResume('claude', id, `${prefix}/one`);
+            expect(mocks.stat).toHaveBeenLastCalledWith(join('/dedicated/claude', 'projects', `-${'a'.repeat(199)}-rr6fnt`, `${id}.jsonl`));
+            await checkNativeResume('claude', id, `${prefix}/two`);
+            expect(mocks.stat).toHaveBeenLastCalledWith(join('/dedicated/claude', 'projects', `-${'a'.repeat(199)}-rr6jlb`, `${id}.jsonl`));
+            for (const code of ['EACCES', 'ENOTDIR']) {
+                const error = Object.assign(new Error(code), { code });
+                mocks.stat.mockRejectedValueOnce(error);
+                await expect(checkNativeResume('claude', id, `${prefix}/one`)).rejects.toBe(error);
+            }
+        } finally { vi.unstubAllEnvs(); }
+    });
     it('only treats a missing Claude transcript as absence, preserving IO errors', async () => {
         await checkNativeResume('claude', id, '/work');
         mocks.stat.mockRejectedValueOnce(Object.assign(new Error('missing'), { code: 'ENOENT' }));
